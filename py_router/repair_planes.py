@@ -855,6 +855,14 @@ def auto_detect_zones(
 
 
 
+def plane_chamfer_corners(route_knobs) -> bool:
+    """Whether the plane cleanup cuts 90-degree corners: as the route step
+    does (off with its --no-smoothing or --allow-90-corners), and on for a
+    standalone run unless --allow-90-corners."""
+    knobs = route_knobs or {}
+    return bool(knobs.get('smoothing', True)) and not knobs.get('allow_90_corners', False)
+
+
 def repair_planes(*args, via_span: Optional[List[str]] = None,
                   via_span_type: Optional[str] = None, **kwargs):
     """`_repair_planes_all`, on a via span when one is given (#1842), or when
@@ -3483,6 +3491,8 @@ def _repair_planes_all(
                                 board_edge_clearance=_reconnect_edge()),
                 label='Plane ', phantom=False, via_nudge=False, neck=False,
                 microshift_max_shift=grid_step,
+                # the route step's 45-degree corners reach the plane taps too
+                chamfer_corners=plane_chamfer_corners(route_knobs),
                 # 13 passes that reported nothing: the status bar sat on the
                 # previous phase's label for the whole cleanup.
                 progress_callback=progress_callback)
@@ -3855,6 +3865,10 @@ Examples:
     # #489 §9: this step lays tap traces INTO pads and places repair vias, so it
     # needs the same teardrop switch route.py / route_diff.py / route_planes.py
     # have. GUI: the existing "Add teardrops" checkbox feeds it.
+    parser.add_argument("--allow-90-corners", action="store_true",
+                        help="Keep 90-degree track corners in the repair copper. By "
+                             "default its cleanup cuts each one with a 45-degree leg "
+                             "where clearance allows, as route.py does.")
     parser.add_argument("--add-teardrops", action="store_true",
                         help="Add teardrop settings to all pads and vias in output file")
 
@@ -4046,7 +4060,8 @@ Examples:
             clamp_netclasses=args._clamp_netclasses,
             clearance_ceiling=args._clearance_ceiling,
             add_teardrops=args.add_teardrops,
-            same_net_pad_clearance=args.same_net_pad_clearance
+            same_net_pad_clearance=args.same_net_pad_clearance,
+            route_knobs={'allow_90_corners': args.allow_90_corners},
         )
     except _SpanError as exc:
         print(f"Error: {exc}")

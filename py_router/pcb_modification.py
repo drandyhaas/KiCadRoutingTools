@@ -5895,8 +5895,22 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                              dry_run: bool = False,
                              min_gain: float = 0.01,
                              max_net_segs: int = 400,
-                             max_chain_segs: int = 100):
+                             max_chain_segs: int = 100,
+                             chamfer_corners: bool = False,
+                             chamfer_leg: float = 0.5):
     """Collapse grid-A* staircase micro-jogs into octolinear shortcuts (#536).
+
+    With ``chamfer_corners`` this call smooths nothing and cuts 90-degree
+    corners instead (the cleanup pipeline's last copper step; route.py runs it
+    unless --allow-90-corners): wherever exactly two same-layer, same-width
+    tracks of a routed net meet at 90 degrees with no via, each is cut back by
+    up to ``chamfer_leg`` mm (at most half its length; halved once when the
+    full cut does not clear). A corner on a pad is left (the pad copper fills
+    it), and so is one where other same-net copper touches the cut-off pieces.
+    The new leg passes the shortcut clearance test, adds no track inside a
+    keep-away band (#2006) and may not degrade the net's connectivity. Acute
+    corners are left: cutting them would leave the 45-degree grid. Under
+    keep_input_copper only this run's tracks are cut.
 
     Walks each net's simple track chains (split at junctions, same-net vias,
     pad landings, width changes, layer changes) and greedily replaces the
@@ -6221,6 +6235,150 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     removed_ids = set()
     original_to_remove = []
     added_segments = []
+
+    def touched(gone, pts, s1, s2, net_segs, net_pads, net_vias, layer, w):
+        """True when same-net copper other than the corner's own two tracks
+        touches a piece the cut removes and the new path ``pts`` does not
+        take it over: a track end or via there must lie on the new centreline,
+        a pad must still be reached (#319: the final copper step removes
+        nothing that still carries a connection)."""
+        new = list(zip(pts, pts[1:]))
+
+        def on_new(x, y):
+            return any(_pt_seg_dist(x, y, a[0], a[1], b[0], b[1]) <= COINCIDENCE_TOL
+                       for a, b in new)
+
+        def samples(a, b):
+            k = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.02))
+            return [(a[0] + (b[0] - a[0]) * t / k, a[1] + (b[1] - a[1]) * t / k)
+                    for t in range(k + 1)]
+
+        for (x1, y1), (x2, y2) in gone:
+            for s in net_segs:
+                if s is s1 or s is s2 or s.layer != layer:
+                    continue
+                r = (s.width + w) / 2.0 + COINCIDENCE_TOL
+                for ex, ey in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+                    if _pt_seg_dist(ex, ey, x1, y1, x2, y2) < r and not on_new(ex, ey):
+                        return True
+            for v in net_vias:
+                if (_pt_seg_dist(v.x, v.y, x1, y1, x2, y2) < (v.size + w) / 2.0 + COINCIDENCE_TOL
+                        and not on_new(v.x, v.y)):
+                    return True
+            for pad in net_pads:
+                if not (layer in pad.layers or any('*' in L for L in pad.layers)):
+                    continue
+                reach = w / 2.0 + COINCIDENCE_TOL
+                if (any(point_to_pad_distance(x, y, pad) <= reach
+                        for x, y in samples((x1, y1), (x2, y2)))
+                        and not any(point_to_pad_distance(x, y, pad) <= reach
+                                    for a, b in new for x, y in samples(a, b))):
+                    return True
+        return False
+
+    def _chamfer_net_corners(net_id, net_pads, net_vias, in_band):
+        """45-degree corners on one net (see the docstring). Returns True when
+        it changed the net. Only this run's tracks under keep_input_copper."""
+        changed = False
+        for _round in range(64):
+            net_segs = [s for s in pcb_data.segments if s.net_id == net_id
+                        and not getattr(s, 'graphic', False)]
+            ends = defaultdict(list)
+            for s in net_segs:
+                ends[vk(s.start_x, s.start_y)].append(s)
+                ends[vk(s.end_x, s.end_y)].append(s)
+            via_keys = {vk(v.x, v.y) for v in net_vias}
+            before = None
+            hit = None
+            for key, pair in ends.items():
+                if len(pair) != 2 or key in via_keys:
+                    continue
+                s1, s2 = pair
+                if s1 is s2 or s1.layer != s2.layer or abs(s1.width - s2.width) > 1e-6:
+                    continue
+                if keep_input_copper and not (id(s1) in routed_seg_result
+                                              and id(s2) in routed_seg_result):
+                    continue
+
+                def far(s):
+                    return ((s.end_x, s.end_y) if vk(s.start_x, s.start_y) == key
+                            else (s.start_x, s.start_y))
+
+                P = ((s1.start_x, s1.start_y) if vk(s1.start_x, s1.start_y) == key
+                     else (s1.end_x, s1.end_y))
+                A, B = far(s1), far(s2)
+                la = math.hypot(A[0] - P[0], A[1] - P[1])
+                lb = math.hypot(B[0] - P[0], B[1] - P[1])
+                if la < 1e-6 or lb < 1e-6:
+                    continue
+                ua = ((A[0] - P[0]) / la, (A[1] - P[1]) / la)
+                ub = ((B[0] - P[0]) / lb, (B[1] - P[1]) / lb)
+                if abs(ua[0] * ub[0] + ua[1] * ub[1]) > 1e-3:
+                    continue                      # not a 90-degree corner
+                w, layer = s1.width, s1.layer
+                if any((layer in pad.layers or any('*' in L for L in pad.layers))
+                       and point_to_pad_distance(P[0], P[1], pad) <= w / 2.0 + COINCIDENCE_TOL
+                       for pad in net_pads):
+                    continue                      # on a pad: its copper fills the corner
+                cut = min(chamfer_leg, la / 2.0, lb / 2.0)
+                for c in (cut, cut / 2.0):
+                    if c < max(w / 2.0, _SMOOTH_DEGENERATE_LEG):
+                        break
+                    P1 = (P[0] + ua[0] * c, P[1] + ua[1] * c)
+                    P2 = (P[0] + ub[0] * c, P[1] + ub[1] * c)
+                    pts = [A, P1, P2, B]
+                    gone = ((P, P1), (P, P2))     # the pieces the cut removes
+                    if touched(gone, pts, s1, s2, net_segs, net_pads, net_vias, layer, w):
+                        continue
+                    if in_band is not None:
+                        added = in_band(layer, P1[0], P1[1], P2[0], P2[1], w)
+                        if added > 0.0 and added > sum(
+                                in_band(layer, q[0][0], q[0][1], q[1][0], q[1][1], w)
+                                for q in gone) + 1e-9:
+                            continue
+                    if not clears(P1[0], P1[1], P2[0], P2[1], layer, net_id, w):
+                        continue
+                    hit = (s1, s2, [Segment(start_x=pts[q][0], start_y=pts[q][1],
+                                            end_x=pts[q + 1][0], end_y=pts[q + 1][1],
+                                            width=w, layer=layer, net_id=net_id)
+                                    for q in range(3)
+                                    if math.hypot(pts[q + 1][0] - pts[q][0],
+                                                  pts[q + 1][1] - pts[q][1]) > _SMOOTH_DEGENERATE_LEG])
+                    trial = [s for s in net_segs if s is not s1 and s is not s2] + hit[2]
+                    if before is None:
+                        before = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
+                                                        [], pcb_data=pcb_data)
+                    if worse(before, check_net_connectivity(net_id, trial, net_vias, net_pads,
+                                                            [], pcb_data=pcb_data)):
+                        hit = None
+                        continue
+                    break
+                if hit:
+                    break
+            if not hit:
+                return changed
+            s1, s2, new = hit
+            res = None
+            for s in (s1, s2):
+                if id(s) in routed_seg_result:
+                    removed_ids.add(id(s))
+                    res = res or routed_seg_result[id(s)]
+                else:
+                    original_to_remove.append(s)
+            if res is None:
+                res = {'new_segments': [], 'new_vias': [], 'cleanup': 'chamfer_corners'}
+                results.append(res)
+            res['new_segments'] = list(res.get('new_segments') or []) + new
+            for s in new:
+                routed_seg_result[id(s)] = res
+            added_segments.extend(new)
+            pcb_data.segments = [s for s in pcb_data.segments
+                                 if s is not s1 and s is not s2] + new
+            if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+                pcb_data._foreign_seg_arr_cache = None
+            stats['corners_chamfered'] = stats.get('corners_chamfered', 0) + 1
+            changed = True
+        return changed
     nets_changed = 0
     stats = {'nets': 0, 'nets_skipped_large': 0, 'chains': 0, 'spans': 0,
              'segs_removed': 0, 'segs_added': 0, 'saved_mm': 0.0,
@@ -6249,6 +6407,10 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
             net_vias = vias_by_net.get(net_id, [])
             # #2006: built per net, after the nets before it were smoothed.
             in_band = band_meter(pcb_data, config, net_id) if config is not None else None
+            if chamfer_corners:
+                if not dry_run and _chamfer_net_corners(net_id, net_pads, net_vias, in_band):
+                    nets_changed += 1
+                continue
 
             candidates = [s for s in net_segs
                           if not getattr(s, 'graphic', False)
