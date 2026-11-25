@@ -2070,12 +2070,15 @@ def pad_override_floor_record(records, rule_before, rule_after, uncapped):
 
     ``rule_before`` / ``rule_after``: the rule before and after this writer
     lowered it (mm; None / 0 = undeclared). ``uncapped``: what the writer
-    would have written WITHOUT the #530 pad-override cap -- its routed
-    clearance, under the ``.kicad_dru`` cap (#498), which is a board
-    declaration. The board's own minimum after the write is the smaller of
-    the board's minimum before it (unmasked through an earlier record) and
-    ``uncapped``; a rule below that was lowered for a pad override only, and
-    is recorded so ``--escalation board`` reads the board's value instead."""
+    would have written WITHOUT the #530 pad-override cap and the #498
+    ``.kicad_dru`` cap -- its routed clearance. A dru rule binds only the
+    items its condition names, and those route at the rule whatever the
+    escalation, so its value is not a minimum the board declares for every
+    other net (#2060). The board's own minimum after the write is the smaller
+    of the board's minimum before it (unmasked through an earlier record) and
+    ``uncapped``; a rule below that was lowered for a pad override or a dru
+    rule only, and is recorded so ``--escalation board`` reads the board's
+    value instead."""
     from fab_tiers import board_declared_min_clearance
 
     def _pos(v):
@@ -3295,12 +3298,13 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     except Exception:
         pass
     # #1369: what min_clearance would be WITHOUT the #530 pad-override cap
-    # (the routed clearance, under the dru cap), and the rule before this
-    # write -- the pad-override provenance record compares the two.
+    # and the #498 .kicad_dru cap -- the clearance the step routed the board
+    # at -- and the rule before this write; the provenance record compares
+    # the two. A dru rule binds only the items its condition names, so its
+    # value is not a minimum the board declares for everything else (#2060).
     _mc_uncapped = None
     if targets.get("min_clearance") is not None:
-        _mc_uncapped = min(v for v in (_class_clearance(targets), _dru_min)
-                           if v is not None)
+        _mc_uncapped = _class_clearance(targets)
     _mc_before = (((proj.get("board") or {}).get("design_settings") or {})
                   .get("rules") or {}).get("min_clearance")
     # #856: severities are the project author's statement of what counts as a
@@ -3346,8 +3350,9 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
         _rec1369 = (proj.get("kicad_routing_tools") or {}).get(PAD_OVERRIDE_FLOOR_KEY)
         changes = list(changes) + [
             f"kicad_routing_tools.{PAD_OVERRIDE_FLOOR_KEY}: "
-            + (f"rules.min_clearance {_rec1369['rule']} mm is a pad clearance "
-               f"override; the board's own is {_rec1369['board']} mm"
+            + (f"rules.min_clearance {_rec1369['rule']} mm is capped at a pad "
+               f"clearance override or a .kicad_dru clearance; the board's own "
+               f"is {_rec1369['board']} mm"
                if _rec1369 else "dropped (the rule is the board's own)")]
         LAST_PROJECT_WRITES[:] = list(changes)
     # #1160: a Default class lowered by an automatic descent, not a request.
@@ -3591,12 +3596,12 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
             targets["min_clearance"] = _dru_min
     except Exception:
         pass
-    # #1369: min_clearance without the #530 pad-override cap, for the
-    # provenance record (fix_project_for_output's twin).
+    # #1369: min_clearance without the #530 pad-override cap or the #498
+    # .kicad_dru cap, for the provenance record (fix_project_for_output's
+    # twin, #2060).
     _mc_uncapped = None
     if targets.get("min_clearance") is not None:
-        _mc_uncapped = min(v for v in (_class_clearance(targets), _dru_min)
-                           if v is not None)
+        _mc_uncapped = _class_clearance(targets)
 
     # rule key -> BOARD_DESIGN_SETTINGS attribute (units: nm). Only loosen.
     attr = {
