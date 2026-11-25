@@ -856,11 +856,11 @@ def auto_detect_zones(
 
 
 def plane_chamfer_corners(route_knobs) -> bool:
-    """Whether the plane cleanup cuts 90-degree corners: as the route step
-    does (off with its --no-smoothing or --allow-90-corners), and on for a
-    standalone run unless --allow-90-corners."""
+    """Whether the plane cleanup cuts 90-degree corners: only when asked
+    (--chamfer-corners on the route step or on this tool), and not with the
+    route step's --no-smoothing."""
     knobs = route_knobs or {}
-    return bool(knobs.get('smoothing', True)) and not knobs.get('allow_90_corners', False)
+    return bool(knobs.get('smoothing', True)) and bool(knobs.get('chamfer_corners', False))
 
 
 def repair_planes(*args, via_span: Optional[List[str]] = None,
@@ -3865,10 +3865,10 @@ Examples:
     # #489 §9: this step lays tap traces INTO pads and places repair vias, so it
     # needs the same teardrop switch route.py / route_diff.py / route_planes.py
     # have. GUI: the existing "Add teardrops" checkbox feeds it.
-    parser.add_argument("--allow-90-corners", action="store_true",
-                        help="Keep 90-degree track corners in the repair copper. By "
-                             "default its cleanup cuts each one with a 45-degree leg "
-                             "where clearance allows, as route.py does.")
+    parser.add_argument("--chamfer-corners", action="store_true",
+                        help="Cut 90-degree track corners in the repair copper with a "
+                             "45-degree leg where clearance allows, as route.py "
+                             "--chamfer-corners does. Off by default.")
     parser.add_argument("--add-teardrops", action="store_true",
                         help="Add teardrop settings to all pads and vias in output file")
 
@@ -4061,7 +4061,7 @@ Examples:
             clearance_ceiling=args._clearance_ceiling,
             add_teardrops=args.add_teardrops,
             same_net_pad_clearance=args.same_net_pad_clearance,
-            route_knobs={'allow_90_corners': args.allow_90_corners},
+            route_knobs={'chamfer_corners': args.chamfer_corners},
         )
     except _SpanError as exc:
         print(f"Error: {exc}")
@@ -4075,7 +4075,9 @@ Examples:
         _snapped, _removed = clean_plane_copper(
             args.output_file, net_names, args.clearance, args.grid_step,
             effective_board_edge_clearance(
-                args.input_file, args.board_edge_clearance if _edge_given else 0.0))
+                args.input_file, args.board_edge_clearance if _edge_given else 0.0),
+            chamfer_corners=plane_chamfer_corners(
+                {'chamfer_corners': args.chamfer_corners}))
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
         # Castellated landings (run-6 fix 1.7): reconnect/tap copper that

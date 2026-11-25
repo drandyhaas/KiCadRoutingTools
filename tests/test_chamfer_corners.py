@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """45-degree corners: chamfer_corners cuts 90-degree track corners.
 
-With chamfer_corners (the cleanup pipeline's last copper step; route.py runs it
-unless --allow-90-corners), each 90-degree corner of a routed net gets a
+With chamfer_corners (the cleanup pipeline's last copper step; route.py and
+repair_planes.py run it with --chamfer-corners, off by default), each 90-degree
+corner of a routed net gets a
 45-degree leg, under the shortcut clearance test and the keep-away band. A
 corner on a pad, or with other same-net copper on the cut-off pieces, is left.
 Without it, nothing changes. Acute corners are left alone.
@@ -239,14 +240,14 @@ def test_plane_finalize_cleanup():
     from types import SimpleNamespace
     from cleanup_pipeline import run_post_route_cleanup
     from route import _FINALIZE_ROUTE_KNOBS
-    check("allow_90_corners is a route knob of the plane finalize",
-          'allow_90_corners' in _FINALIZE_ROUTE_KNOBS)
+    check("chamfer_corners is a route knob of the plane finalize",
+          'chamfer_corners' in _FINALIZE_ROUTE_KNOBS)
     from repair_planes import plane_chamfer_corners
-    check("repair_planes: on by default, standalone and in-run",
-          plane_chamfer_corners(None) and plane_chamfer_corners({'smoothing': True}))
-    check("repair_planes: --allow-90-corners and --no-smoothing turn it off",
-          not plane_chamfer_corners({'allow_90_corners': True})
-          and not plane_chamfer_corners({'smoothing': False}))
+    check("repair_planes: off by default, standalone and in-run",
+          not plane_chamfer_corners(None) and not plane_chamfer_corners({'smoothing': True}))
+    check("repair_planes: on with --chamfer-corners, off again with --no-smoothing",
+          plane_chamfer_corners({'chamfer_corners': True})
+          and not plane_chamfer_corners({'chamfer_corners': True, 'smoothing': False}))
     for flag in (True, False):
         pcb = board(ELBOW, extra_pads=[BLOCK])
         out = run_post_route_cleanup(
@@ -258,12 +259,137 @@ def test_plane_finalize_cleanup():
               n == (1 if flag else 0) and has_corner(pcb.segments) != flag, n)
 
 
+def _stats(pcb):
+    return smooth_octolinear_chains([], pcb, clearance=CLR, chamfer_corners=True)[4]
+
+
+def test_width_change_cut_at_the_narrower_width():
+    # a 0.6 mm track necks down to 0.15 mm at a 90-degree corner: the new leg
+    # takes the narrower width, each kept piece keeps its own
+    pcb = board(ELBOW, extra_pads=[BLOCK])
+    pcb.segments[0].width = 0.6
+    st = _stats(pcb)
+    check("neck-down elbow: chamfered", st.get('corners_chamfered') == 1, st)
+    diag = [s for s in pcb.segments if abs(s.end_x - s.start_x) > 1e-6
+            and abs(s.end_y - s.start_y) > 1e-6]
+    check("... the 45-degree leg at the narrower width",
+          len(diag) == 1 and abs(diag[0].width - 0.15) < 1e-9, [(s.width) for s in diag])
+    check("... the kept pieces keep their widths",
+          sorted(round(s.width, 3) for s in pcb.segments if s not in diag) == [0.15, 0.6],
+          [(s.start_x, s.start_y, s.end_x, s.end_y, s.width) for s in pcb.segments])
+
+
+def test_corners_left_counted_by_reason():
+    via = Via(x=14.0, y=10.0, size=0.6, drill=0.3, layers=['F.Cu', 'B.Cu'], net_id=1)
+    st = _stats(board(ELBOW, extra_pads=[BLOCK], vias=[via]))
+    check("a via at the corner: left, counted as 'via'",
+          st.get('corners_left') == {'via': 1}, st)
+    # a 0.12 mm leg too short to cut, ending on a small same-net pad (not a
+    # plain joint), so it cannot be taken whole either
+    pad_b = _pad('C', 14.0, 10.14, 1, '/SIG', 0.06, 0.06)
+    st = _stats(board([(10.0, 10.0), (14.0, 10.0), (14.0, 10.14), (18.0, 10.14)],
+                      extra_pads=[BLOCK, pad_b]))
+    check("a short leg ending on a pad: left, counted as 'short leg'",
+          st.get('corners_left', {}).get('short leg', 0) >= 1, st)
+    st = _stats(board(ELBOW, extra_pads=[BLOCK, _pad('X', 13.8, 10.2, 2, '/OTHER', 0.2, 0.2)]))
+    check("foreign copper inside the corner: left, counted as 'blocked'",
+          st.get('corners_left') == {'blocked': 1}, st)
+    st = _stats(board(ELBOW, extra_pads=[BLOCK]))
+    check("a corner that is cut is not counted as left",
+          not st.get('corners_left'), st)
+
+
+def _no_right_angle(segs):
+    return not has_corner(segs)
+
+
+def test_short_leg_taken_whole():
+    # a 0.12 mm jog between two long runs at 0.15 mm: too short to cut from
+    # both ends, but its far end is a plain joint whose turn stays at 45
+    # degrees, so the cut takes the leg whole: both 90-degree corners go
+    jog = [(10.0, 10.0), (14.0, 10.0), (14.0, 10.12), (18.0, 10.12)]
+    pcb = board(jog, extra_pads=[BLOCK])
+    st = _stats(pcb)
+    check("a jog: the short leg taken whole, no 90-degree corner left",
+          st.get('corners_chamfered') == 1 and _no_right_angle(pcb.segments)
+          and not st.get('corners_left'),
+          (st, [(s.start_x, s.start_y, s.end_x, s.end_y) for s in pcb.segments]))
+    check("... the new leg ends exactly at the joint (14, 10.12)",
+          any(abs(s.end_x - 14.0) < 1e-9 and abs(s.end_y - 10.12) < 1e-9
+              or abs(s.start_x - 14.0) < 1e-9 and abs(s.start_y - 10.12) < 1e-9
+              for s in pcb.segments))
+
+
+def test_short_leg_left_when_the_turn_at_its_end_would_not_stay():
+    # the run after the short leg turns so that the diagonal would meet it at
+    # 90 degrees (down-right) or double back (acute): left
+    for name, nxt in (("90 degrees", (16.0, 8.12)), ("acute", (10.0, 10.12))):
+        pcb = board([(10.0, 10.0), (14.0, 10.0), (14.0, 10.12), nxt], extra_pads=[BLOCK])
+        st = _stats(pcb)
+        check(f"turn at the short leg's end would be {name}: not taken whole",
+              not st.get('corners_chamfered') and st.get('corners_left', {}).get('short leg'),
+              st)
+
+
+def test_degenerate_short_leg_left():
+    # a leg below the degenerate length would be filtered out of the new
+    # copper and leave a gap: not taken, counted as 'short leg'
+    pcb = board([(10.0, 10.0), (14.0, 10.0), (14.0, 10.000005), (18.0, 10.000005)],
+                extra_pads=[BLOCK])
+    st = _stats(pcb)
+    check("a degenerate short leg: not taken",
+          not st.get('corners_chamfered'), st)
+
+
+def test_corners_on_a_net_over_the_size_cap_counted():
+    # a net with more tracks than max_net_segs is not looked at; its corners
+    # are counted as left, not silently missing
+    pcb = board(ELBOW, extra_pads=[BLOCK])
+    st = smooth_octolinear_chains([], pcb, clearance=CLR, chamfer_corners=True,
+                                  max_net_segs=1)[4]
+    check("a net over the size cap: its corner counted as 'net over size cap'",
+          st.get('corners_left') == {'net over size cap': 1}
+          and st.get('nets_skipped_large') == 1, st)
+
+
+def test_cli_plane_cleanup():
+    # the CLI plane finalize's cleanup leg (clean_plane_copper ->
+    # compute_plane_copper_cleanup) cuts the corner with the flag, keeps it without
+    from pcb_modification import compute_plane_copper_cleanup
+    for flag in (True, False):
+        pcb = board(ELBOW, extra_pads=[BLOCK])
+        delta = compute_plane_copper_cleanup(pcb, ['/SIG'], CLR, 0.05, 0.0,
+                                             chamfer_corners=flag)
+        diag = [c for c in delta.connectors if abs(c.end_x - c.start_x) > 1e-6
+                and abs(c.end_y - c.start_y) > 1e-6]
+        check(f"CLI plane cleanup, chamfer_corners={flag}: {'cut' if flag else 'kept'}",
+              bool(diag) == flag and bool(delta.segments_to_remove) == flag,
+              ([(c.start_x, c.start_y, c.end_x, c.end_y) for c in delta.connectors],
+               len(delta.segments_to_remove)))
+
+
+def test_default_is_off():
+    # opt-in: route.py's batch_route and the cleanup pipeline leave corners
+    # alone unless asked, so a default run is upstream's
+    import inspect
+    from route import batch_route
+    from cleanup_pipeline import run_post_route_cleanup
+    check("batch_route: chamfer_corners defaults to False",
+          inspect.signature(batch_route).parameters['chamfer_corners'].default is False)
+    check("run_post_route_cleanup: chamfer_corners defaults to False",
+          inspect.signature(run_post_route_cleanup).parameters['chamfer_corners'].default is False)
+
+
 TESTS = [test_elbow_chamfered, test_off_by_default_in_the_pass, test_foreign_copper_blocks,
          test_same_net_via_at_corner_pins_it, test_acute_corner_left_alone,
          test_corner_on_a_pad_left, test_stem_on_a_cut_piece_blocks,
          test_chain_continuing_past_a_short_leg,
          test_via_on_a_cut_piece_blocks, test_keep_away_band, test_corner_pass_smooths_nothing,
-         test_plane_finalize_cleanup]
+         test_plane_finalize_cleanup, test_width_change_cut_at_the_narrower_width,
+         test_corners_left_counted_by_reason, test_short_leg_taken_whole,
+         test_short_leg_left_when_the_turn_at_its_end_would_not_stay,
+         test_degenerate_short_leg_left, test_corners_on_a_net_over_the_size_cap_counted,
+         test_cli_plane_cleanup, test_default_is_off]
 
 if __name__ == '__main__':
     for t in TESTS:

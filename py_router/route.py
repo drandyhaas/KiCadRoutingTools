@@ -305,7 +305,7 @@ _FINALIZE_ROUTE_KNOBS = (
     'ripped_route_avoidance_radius', 'ripped_route_avoidance_cost',
     'crossing_penalty', 'crossing_layer_check', 'routing_clearance_margin',
     'max_rip_up_count', 'ripup_abandon_metric', 'ripup_blocker_select',
-    'enable_layer_switch', 'can_swap_to_top_layer', 'smoothing', 'allow_90_corners',
+    'enable_layer_switch', 'can_swap_to_top_layer', 'smoothing', 'chamfer_corners',
     'mps_unroll', 'mps_reverse_rounds', 'mps_layer_swap',
     'mps_segment_intersection', 'keepout_enabled', 'keepout_layer',
     'guide_corridor_enabled', 'guide_corridor_layer', 'guide_corridor_spacing',
@@ -2738,7 +2738,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 net_clearances: dict = None,
                 keep_input_copper: bool = False,
                 smoothing: bool = True,
-                allow_90_corners: bool = False,
+                chamfer_corners: bool = False,
                 rip_existing_nets: Optional[List[str]] = None,
                 # Net name patterns whose matches are protected for THIS run
                 # (reason 'user') and persisted to the output .kicad_pro like
@@ -5828,7 +5828,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # them, presumably by freeing corridor space. --no-smoothing disables it
         # per step; KICAD_SMOOTH_ROUTE=0/1 still overrides either way.
         smooth=smoothing,
-        chamfer_corners=smoothing and not allow_90_corners,
+        chamfer_corners=smoothing and chamfer_corners,
         # #1063: the strict collapse runs ONCE, at the end of the outermost
         # run (_late_strict_collapse1063), never here -- the plane finalize
         # and the reconciliation route around this copper, and collapsing it
@@ -8340,7 +8340,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _cs, _cr = clean_plane_copper(
                         output_file, sorted(set(_zn)),
                         config.clearance, config.grid_step,
-                        config.board_edge_clearance)
+                        config.board_edge_clearance,
+                        # the route step's 45-degree corners, as the engine leg
+                        chamfer_corners=smoothing and chamfer_corners)
                     print(f"  [finalize timing] cleanup leg: "
                           f"{_time9.time() - _t9:.1f}s")
                     if _cs or _cr:
@@ -11182,12 +11184,11 @@ For differential pair routing, use route_diff.py:
     _sm.add_argument("--no-smoothing", dest="smoothing", action="store_false",
                      help="Disable #536 octolinear smoothing for this step. "
                           "KICAD_SMOOTH_ROUTE=0/1 overrides either way.")
-    parser.add_argument("--allow-90-corners", action="store_true",
-                        help="Keep 90-degree track corners. By default the smoothing "
-                             "pass cuts each one with a 45-degree leg where clearance "
-                             "allows: a 45-degree corner is what designers expect "
-                             "from a router, and sharp copper corners etch less "
-                             "cleanly. --no-smoothing also skips it.")
+    parser.add_argument("--chamfer-corners", action="store_true",
+                        help="Cut 90-degree track corners with a 45-degree leg where "
+                             "clearance allows, as the cleanup's last copper step (the "
+                             "route step, the plane finalize and its cleanup). Off by "
+                             "default; --no-smoothing also skips it.")
     parser.add_argument("--keep-input-copper", action="store_true",
                         help="Treat the input file's own copper as read-only: the post-route "
                              "cleanup passes (dead-end sweep, orphan islands, cycle/redundancy "
@@ -11867,7 +11868,7 @@ For differential pair routing, use route_diff.py:
                 net_clearances=_net_clearances_map,
                 keep_input_copper=args.keep_input_copper,
                 smoothing=args.smoothing,
-                allow_90_corners=args.allow_90_corners,
+                chamfer_corners=args.chamfer_corners,
                 via_size=args.via_size,
                 via_drill=args.via_drill,
                 grid_step=args.grid_step,

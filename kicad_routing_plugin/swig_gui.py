@@ -1658,6 +1658,15 @@ class RoutingDialog(wx.Dialog):
             "nets and OFF at 149, so disabling it costs ~20 nets. Uncheck only to A/B.")
         options_inner.Add(self.smoothing, 0, wx.ALL, 3)
 
+        # 45-degree corners (route.py --chamfer-corners), OFF by default. Named
+        # `chamfer_corners` to match the engine param.
+        self.chamfer_corners = wx.CheckBox(options_scroll, label="45-degree corners")
+        self.chamfer_corners.SetValue(False)
+        self.chamfer_corners.SetToolTip(
+            "Cut 90-degree track corners with a 45-degree leg where clearance allows "
+            "(route.py --chamfer-corners). Needs 'Smooth routes'.")
+        options_inner.Add(self.chamfer_corners, 0, wx.ALL, 3)
+
         # Layer costs
         layer_sizer = wx.BoxSizer(wx.HORIZONTAL)
         layer_sizer.Add(wx.StaticText(options_scroll, label="Layer Costs:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
@@ -3111,6 +3120,7 @@ class RoutingDialog(wx.Dialog):
         self.mps_layer_swap.SetValue(False)
         self.keep_input_copper.SetValue(False)
         self.smoothing.SetValue(True)
+        self.chamfer_corners.SetValue(False)
         self.mps_segment_intersection.SetValue(False)
         self.bus_enabled.SetValue(False)
         self.bus_detection_radius.SetValue(defaults.BUS_DETECTION_RADIUS)
@@ -3526,6 +3536,7 @@ class RoutingDialog(wx.Dialog):
             'mps_layer_swap': self.mps_layer_swap.GetValue(),
             'keep_input_copper': self.keep_input_copper.GetValue(),
             'smoothing': self.smoothing.GetValue(),
+            'chamfer_corners': self.chamfer_corners.GetValue(),
             'force_reroute': self.force_reroute.GetValue(),
             'mps_segment_intersection': self.mps_segment_intersection.GetValue(),
             # Bus routing options
@@ -4077,6 +4088,7 @@ class RoutingDialog(wx.Dialog):
                     mps_layer_swap=config.get('mps_layer_swap', False),
                     keep_input_copper=config.get('keep_input_copper', False),
                     smoothing=config.get('smoothing', True),
+                    chamfer_corners=config.get('chamfer_corners', False),
                     mps_segment_intersection=config.get('mps_segment_intersection', False),
                     bus_enabled=config.get('bus_enabled', False),
                     bus_detection_radius=config.get('bus_detection_radius', 5.0),

@@ -781,8 +781,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
 
     # 45-degree corners: LAST copper-shape step, so the corners joint bridging
     # and the merges above leave are seen too. The caller decides (route.py:
-    # off with --no-smoothing or --allow-90-corners; the plane finalize the
-    # same through its route knobs); KICAD_SMOOTH_ROUTE=0 and guide-corridor
+    # on with --chamfer-corners, off with --no-smoothing; the plane finalize
+    # the same through its route knobs); KICAD_SMOOTH_ROUTE=0 and guide-corridor
     # steps turn it off as they do the smoothing.
     if chamfer_corners and _sm_env not in ('0', 'false', 'off') \
             and not getattr(config, 'guide_corridor_enabled', False):
@@ -795,11 +795,17 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             skip_net_ids=_smooth_skip_net_ids(pcb_data),
             chamfer_corners=True)
         counts['corners_chamfered'] = _ch_stats.get('corners_chamfered', 0)
+        _ch_left = _ch_stats.get('corners_left') or {}
+        counts['corners_left'] = sum(_ch_left.values())
         strip.extend(_ch_strip)
-        if _ch_stats.get('corners_chamfered'):
+        if _ch_stats.get('corners_chamfered') or _ch_left:
             print(f"{label}45-degree corners: chamfered "
-                  f"{_ch_stats['corners_chamfered']} 90-degree corner(s) on "
-                  f"{_ch_nets} net(s)")
+                  f"{_ch_stats.get('corners_chamfered', 0)} 90-degree corner(s) on "
+                  f"{_ch_nets} net(s)"
+                  + (f"; left {sum(_ch_left.values())}: "
+                     + ", ".join(f"{why} {n}" for why, n in sorted(
+                         _ch_left.items(), key=lambda kv: (-kv[1], kv[0])))
+                     if _ch_left else ""))
 
     # #1843: the collinear merge (and smoothing) can join a split back
     _as_n = _area_split(results, pcb_data, config, None)
