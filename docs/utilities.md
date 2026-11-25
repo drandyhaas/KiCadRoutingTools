@@ -3438,7 +3438,10 @@ feed and an exposed pad split into several pads of one number all draw.
   read from the fill model (`plane_fill_model.get_fill_models`, the copper the
   pour lays around foreign items) and solved on a square mesh, each cell
   weighted by the share of it that is copper. A via, a pad and a track end on
-  the pour meet the cells under their copper.
+  the pour meet the cells under their copper. Whether one is on the pour at
+  all is read off the fill model's own raster (its copper reaches a fill
+  cell), not off the mesh, so a track end beside the fill stays off it at
+  every `--pour-mesh-mm` and wherever the mesh grid falls.
 - `--pour-mesh-mm` — the mesh cell, default 0.25. A 20 x 2 mm strip between
   two pads reads within 1% of `rho * L / (W * t)` at the default.
 - `--via-plating-um` — the barrel wall, default 25. It is an ASSUMPTION about

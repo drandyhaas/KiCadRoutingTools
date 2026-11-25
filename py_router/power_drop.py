@@ -30,7 +30,10 @@ A copper pour is a sheet: each pour of the net is read from the fill model
 (`plane_fill_model.get_fill_models`, the copper the pour really lays around
 foreign items), coarsened to a square mesh, and solved as resistors of one
 sheet resistance, rho / thickness, between neighbouring cells. A via, a pad
-and a track end standing on the pour meet the cells under their copper.
+and a track end standing on the pour meet the cells under their copper. Whether
+it stands on the pour at all is judged on the fill model's own raster -- its
+copper reaches a fill cell -- not on the mesh, so the answer does not move
+with the mesh size or with where the mesh grid falls (#2069).
 
 What is NOT in the solve, and is said so in the result: a pour whose fill
 model could not be built, thermal-relief spokes (a pad's contact with a pour
@@ -417,7 +420,10 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
                 def cells_within(px, py, reach, xs=xs, ys=ys, ids=ids, side=side):
                     """(node, x, y) of the mesh cells whose centre is within
                     ``reach`` of (px, py); the nearest one when none is, if
-                    it is within a cell."""
+                    it is within a cell. Which cells an item already IN
+                    CONTACT with the fill joins (`fill_contact` decides
+                    that): on a coarse mesh a via or a track end on the
+                    pour may have no cell centre under its copper."""
                     i0 = max(int((px - reach - xs[0]) / side), 0)
                     i1 = min(int((px + reach - xs[0]) / side) + 2, len(xs))
                     j0 = max(int((py - reach - ys[0]) / side), 0)
@@ -437,22 +443,83 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
                         return [(int(win[at]), float(gx[at]), float(gy[at]))]
                     return []
 
+                def fill_contact(px, py, reach, pad=None, first=True, m=m, fill=fill):
+                    """The fill model's own cells (i, j) that the item's
+                    copper meets: a fill cell whose centre lies within half
+                    a model cell of the disc of radius ``reach`` round
+                    (px, py), or of ``pad``'s copper. Contact is judged on
+                    the fill model's raster, never on the mesh, so it does
+                    not move with ``pour_mesh_mm`` or with where the mesh
+                    grid falls (#2069): an end beside the fill but not on
+                    it stays off it at every mesh. ``first`` stops at the
+                    first contact."""
+                    fc = m.cell
+                    g = reach + fc
+                    i0 = max(int(math.floor((px - g - m.x0) / fc)), 0)
+                    i1 = min(int((px + g - m.x0) / fc) + 2, fill.shape[0])
+                    j0 = max(int(math.floor((py - g - m.y0) / fc)), 0)
+                    j1 = min(int((py + g - m.y0) / fc) + 2, fill.shape[1])
+                    if i0 >= i1 or j0 >= j1:
+                        return []
+                    ii, jj = np.nonzero(fill[i0:i1, j0:j1])
+                    if ii.size == 0:
+                        return []
+                    ii, jj = ii + i0, jj + j0
+                    fx = m.x0 + (ii + 0.5) * fc
+                    fy = m.y0 + (jj + 0.5) * fc
+                    tol = fc / 2.0 + JOIN_TOL_MM
+                    if pad is None:
+                        near = np.hypot(fx - px, fy - py) <= reach + tol
+                        return list(zip(ii[near].tolist(), jj[near].tolist()))
+                    out = []
+                    for a, b, x, y in zip(ii.tolist(), jj.tolist(), fx.tolist(), fy.tolist()):
+                        if point_to_pad_distance(x, y, pad) <= tol:
+                            out.append((a, b))
+                            if first:
+                                break
+                    return out
+
+                def contact_cells(touch, k=k, ids=ids):
+                    """Mesh nodes over the fill cells an item touches: the
+                    join for a genuine contact that no mesh cell centre is
+                    near enough to give it."""
+                    out = set()
+                    for a, b in touch:
+                        ci, cj = a // k, b // k
+                        if ci < ids.shape[0] and cj < ids.shape[1] and ids[ci, cj] >= 0:
+                            out.add(int(ids[ci, cj]))
+                    return sorted(out)
+
                 for v, nodes in zip(vias, via_nodes):
                     if layer in nodes:
-                        for c, _x, _y in cells_within(v.x, v.y, v.size / 2.0):
+                        touch = fill_contact(v.x, v.y, v.size / 2.0, first=False)
+                        if not touch:
+                            continue
+                        cs = [c for c, _x, _y in cells_within(v.x, v.y, v.size / 2.0)]
+                        for c in cs or contact_cells(touch):
                             nw.join(nodes[layer], c)
                 for p, nodes in zip(pads, pad_nodes):
                     if layer not in nodes:
                         continue
                     reach = math.hypot(p.size_x, p.size_y) / 2.0
-                    for c, x, y in cells_within(p.global_x, p.global_y, reach):
-                        if point_to_pad_distance(x, y, p) <= side / 2.0:
-                            nw.join(nodes[layer], c)
+                    if not fill_contact(p.global_x, p.global_y, reach, pad=p):
+                        continue
+                    cs = [c for c, x, y in cells_within(p.global_x, p.global_y, reach)
+                          if point_to_pad_distance(x, y, p) <= side / 2.0]
+                    if not cs:
+                        cs = contact_cells(fill_contact(p.global_x, p.global_y, reach,
+                                                        pad=p, first=False))
+                    for c in cs:
+                        nw.join(nodes[layer], c)
                 for j, t in enumerate(segs):
                     if t.layer != layer:
                         continue
                     for (ex, ey), end in seg_ends(j):
-                        for c, _x, _y in cells_within(ex, ey, t.width / 2.0):
+                        touch = fill_contact(ex, ey, t.width / 2.0, first=False)
+                        if not touch:
+                            continue
+                        cs = [c for c, _x, _y in cells_within(ex, ey, t.width / 2.0)]
+                        for c in cs or contact_cells(touch):
                             nw.join(end, c)
                 result['pours'].append({'layer': layer, 'cells': count,
                                         'mesh_mm': round(side, 4),
