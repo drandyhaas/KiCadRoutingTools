@@ -108,6 +108,21 @@ def _at(k, o, p):
     return inside((o.x, o.y))
 
 
+def _seg_gap(a, b, c, d):
+    """the distance between the segments a-b and c-d (0 where they cross)"""
+    def pt(p, u, v):
+        dx, dy = v[0] - u[0], v[1] - u[1]
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 < 1e-18 else max(0.0, min(1.0, ((p[0] - u[0]) * dx + (p[1] - u[1]) * dy) / L2))
+        return math.hypot(p[0] - u[0] - t * dx, p[1] - u[1] - t * dy)
+
+    def side(p, u, v):
+        return (v[0] - u[0]) * (p[1] - u[1]) - (v[1] - u[1]) * (p[0] - u[0])
+    if side(a, c, d) * side(b, c, d) < 0 and side(c, a, b) * side(d, a, b) < 0:
+        return 0.0
+    return min(pt(a, c, d), pt(b, c, d), pt(c, a, b), pt(d, a, b))
+
+
 def fans(pcb, parts, wayouts):
     """each part's FAN: [(x0, y0, x1, y1)], the box of its pads' copper grown as far as its own exits stand out of
     it (a way out starts at an exit; each is its nearest part's)"""
@@ -385,10 +400,160 @@ def lay_after(board, arrays, log=None, packs=(), lanes=()):
     return dict(got, pads=pads, secs=time.time() - t0)
 
 
-def lay(field, parts, wayouts=(), log=None):
+def beneath_nets(pcb, arrays, skip=()):
+    """THE NETS WHOSE WHOLE ROUTE LIES BENEATH AN ARRAY {net name: [its pads]}: a net with a ball on one of `arrays`
+    -- no pour, none of `skip` (names) -- whose every other pad is a surface pad of another part on the far face,
+    inside that array's box of pads: a test point under its ball, a calibration resistor on the back of a memory"""
+    poured = {z.net_id for z in (pcb.zones or []) if z.net_id}
+    out = {}
+    for r in arrays:
+        f = pcb.footprints.get(r)
+        if f is None or not f.pads:
+            continue
+        x0, y0 = min(p.global_x for p in f.pads), min(p.global_y for p in f.pads)
+        x1, y1 = max(p.global_x for p in f.pads), max(p.global_y for p in f.pads)
+        for nid in sorted({p.net_id for p in f.pads if p.net_id and p.net_name and p.pad_type != 'np_thru_hole'}):
+            net = pcb.nets.get(nid)
+            if net is None or nid in poured or net.name in skip or net.name in out:
+                continue
+            rest = [q for q in net.pads if q.component_ref != r and q.pad_type != 'np_thru_hole']
+            if rest and all(not q.drill and f.layer not in q.layers and '*.Cu' not in q.layers
+                            and x0 <= q.global_x <= x1 and y0 <= q.global_y <= y1 for q in rest):
+                out[net.name] = [q for q in net.pads if q.pad_type != 'np_thru_hole']
+    return out
+
+
+def lay_beneath(board, arrays, skip=(), log=None):
+    """THE BALLS JOINED BENEATH THEIR ARRAY, on `board` in place, before the array is fanned out: each net of
+    beneath_nets that is one ball and one pad under it joined whole, as a hand lays a test point under its ball -- a
+    dog-bone and a millimetre of track: a stub to a via on one of the four sites round the ball (the fanout's own
+    lattice), and a track on the far face from the via to the pad, straight or in two legs; a site off the pad
+    before one in it. Fanned out as any signal's, such a ball's escape leads out to the array's edge on a layer of
+    its own, away from the pad that stands under it; a ball beside it takes the site next to that pad, and no later
+    step finds a way back in between the field's vias. The nets' joins are chosen together, the shortest that
+    stand clear of one another and of the board's copper (the fanout plan's own model of it, braid.build_obstacles,
+    and its gates). A ball joined carries copper, and the group's model reads it served
+    (group_ends.served_balls). Returns {'nets': those joined, 'left': those not, 'segments', 'vias', 'secs'} --
+    None with no such net"""
+    import itertools
+    import time
+    import braid as te
+    import copper_gates
+    import rules as _rules
+    t0 = time.time()
+    a = _load(board)
+    nets = beneath_nets(a, arrays, skip)
+    if not nets:
+        return None
+    R = _rules.active()
+    tw, cl, vsz, vdr = R.fan_track, R.clearance, R.via_size, R.via_drill
+    layers = list(a.board_info.copper_layers)
+    gates = copper_gates.Gates(a)
+    ids = {n.name: i for i, n in a.nets.items()}
+    cache = {}
+
+    def obs(nid, layer):
+        if (nid, layer) not in cache:
+            cache[nid, layer] = te.build_obstacles(a, nid, {nid}, layer, margin=cl + tw / 2)
+        return cache[nid, layer]
+
+    def track_ok(nid, layer, p, q):
+        return obs(nid, layer).seg_clear(p, q) and gates.track_ok(p, q, layer, tw, nid, cl)
+
+    def via_ok(nid, q):
+        return gates.via_ok(q, vsz, nid, cl) and all(
+            not (obs(nid, L).point_violation(q, pad=vsz / 2 - tw / 2) or [0])[0] for L in layers)
+
+    def on_pad(p, q, grow=0.0):
+        return abs(q[0] - p.global_x) <= p.size_x / 2 + grow and abs(q[1] - p.global_y) <= p.size_y / 2 + grow
+
+    def joins(nid, ball, pad, half):
+        """a ball's joins to its pad, the cheapest first: (cost, [tracks (a, b, layer)], the via's site)"""
+        face = next(L for L in layers if L in ball.layers)
+        far = next(L for L in layers if L in pad.layers)
+        b, c = (ball.global_x, ball.global_y), (pad.global_x, pad.global_y)
+        out = []
+        for sx, sy in itertools.product((-half, half), repeat=2):
+            q = (round(b[0] + sx, 4), round(b[1] + sy, 4))
+            if not via_ok(nid, q) or not track_ok(nid, face, b, q):
+                continue
+            if on_pad(pad, q):
+                out.append((math.hypot(sx, sy) + 1.0, [(b, q, face)], q))       # (a via in the pad: after the others)
+                continue
+            dx, dy = c[0] - q[0], c[1] - q[1]
+            d = min(abs(dx), abs(dy))
+            step = (math.copysign(d, dx), math.copysign(d, dy))
+            for mid in (None, (q[0] + step[0], q[1] + step[1]), (c[0] - step[0], c[1] - step[1])):
+                legs = [(q, c, far)] if mid is None else [(q, mid, far), (mid, c, far)]
+                legs = [(u, v, L) for u, v, L in legs if math.hypot(v[0] - u[0], v[1] - u[1]) > 1e-6]
+                if all(track_ok(nid, far, u, v) for u, v, _L in legs):
+                    out.append((math.hypot(sx, sy) + sum(math.hypot(v[0] - u[0], v[1] - u[1]) for u, v, _L in legs)
+                                + (0.5 if on_pad(pad, q, vsz / 2) else 0.0), [(b, q, face)] + legs, q))
+                    break
+        return sorted(out, key=lambda o: (o[0], o[2]))
+
+    def clash(o1, o2):
+        """two nets' joins nearer than the board's rules let them stand"""
+        if math.hypot(o1[2][0] - o2[2][0], o1[2][1] - o2[2][1]) < max(vsz + cl, vdr + (R.hole_to_hole or 0.0)) - 1e-9:
+            return True
+        for x, y in ((o1, o2), (o2, o1)):
+            if any(_on(x[2], types.SimpleNamespace(start_x=u[0], start_y=u[1], end_x=v[0], end_y=v[1]),
+                       vsz / 2 + cl + tw / 2 - 1e-9) for u, v, _L in y[1]):
+                return True
+        return any(L1 == L2 and _seg_gap(u1, v1, u2, v2) < tw + cl - 1e-9
+                   for u1, v1, L1 in o1[1] for u2, v2, L2 in o2[1])
+
+    import types
+    menu = {}
+    for name, ps in sorted(nets.items()):
+        balls = [q for q in ps if q.component_ref in arrays]
+        rest = [q for q in ps if q.component_ref not in arrays]
+        if len(balls) != 1 or len(rest) != 1:
+            continue                        # (one ball and one pad under it: any other is fanned out as a signal)
+        f = a.footprints[balls[0].component_ref]
+        xs = sorted({round(p.global_x, 4) for p in f.pads})
+        ys = sorted({round(p.global_y, 4) for p in f.pads})
+        gaps = [v - u for u, v in zip(xs, xs[1:])] + [v - u for u, v in zip(ys, ys[1:])]
+        if not gaps:
+            continue
+        opts = joins(ids[name], balls[0], rest[0], min(gaps) / 2)
+        if opts:
+            menu[name] = opts
+    # the joins chosen together: the most nets joined, then the least copper -- each net's options tried in turn
+    order, best = sorted(menu, key=lambda n: (len(menu[n]), n)), [(), math.inf]
+
+    def choose(k, got, cost):
+        if (len(got), -cost) > (len(best[0]), -best[1]):
+            best[0], best[1] = tuple(got), cost
+        if k == len(order) or len(got) + len(order) - k < len(best[0]):
+            return
+        for o in menu[order[k]]:
+            if not any(clash(o, o2) for _n, o2 in got):
+                choose(k + 1, got + [(order[k], o)], cost + o[0])
+        choose(k + 1, got, cost)
+    choose(0, [], 0.0)
+    tracks = [{'start': u, 'end': v, 'width': tw, 'layer': L, 'net_id': ids[name]}
+              for name, o in best[0] for u, v, L in o[1]]
+    vs = [{'x': o[2][0], 'y': o[2][1], 'size': vsz, 'drill': vdr, 'layers': [layers[0], layers[-1]],
+           'net_id': ids[name]} for name, o in best[0]]
+    relay(board, tracks, vs)
+    done = sorted(name for name, _o in best[0])
+    out = dict(nets=done, left=sorted(set(nets) - set(done)), segments=len(tracks), vias=len(vs),
+               secs=time.time() - t0)
+    if log:
+        short = lambda n: n.split('/')[-1]      # noqa: E731
+        log(f'  joined beneath their array: {len(done)} of {len(nets)} net(s) whose every other pad stands under it '
+            f'on the far face ({", ".join(short(n) for n in done) or "none"}), {out["segments"]} tracks and '
+            f'{out["vias"]} vias' + (f'; not joined, fanned out as any signal: {", ".join(short(n) for n in out["left"])}'
+                                     if out['left'] else ''))
+    return out
+
+
+def lay(field, parts, wayouts=(), log=None, ways=()):
     """the pads beneath `parts` (the group's: its arrays and every bus's destinations) on a poured net tied on the
     board `field`, in place. `wayouts` [{'start', 'end', 'width', 'layer', 'net_id'}]: the lanes' ways out, laid on
-    the copy the pass works on. Returns {'pads': the pads beneath, 'tied': those the kept copper reaches, 'segments',
+    the copy the pass works on -- and `ways`, the same of the arrays' other escapes: laid there too, a tie stands in
+    no escape's mouth (a part's fan is its lanes' exits' alone). Returns {'pads': the pads beneath, 'tied': those the kept copper reaches, 'segments',
     'vias': the kept copper's counts, 'tracks', 'vs': the copper itself, 'strayed': the pieces not kept, 'secs'} --
     None with no pad beneath on a poured net"""
     import time
@@ -402,8 +567,8 @@ def lay(field, parts, wayouts=(), log=None):
     # on an inner layer, half way round it, across where the lanes of two faces leave)
     # (...and on the OUTER layers: a tie is a stub on its pad's face and a via. A rail with no pour beneath the part
     # was run pad to pad on an inner layer along an array's edge, and the lanes leaving that face could not be laid)
-    got = _pass(field, {a.nets[p.net_id].name for p in pads}, pads, wayouts, within=fans(a, set(parts), wayouts),
-                outer=True)
+    got = _pass(field, {a.nets[p.net_id].name for p in pads}, pads, list(wayouts) + list(ways),
+                within=fans(a, set(parts), wayouts), outer=True)
     if not got['tied'] and got['exit'] and log:
         log(f'  field ties: the pass ended with exit {got["exit"]} -- ({field[:-len(".kicad_pcb")]}.ties.log)')
     return dict(got, pads=pads, secs=time.time() - t0)

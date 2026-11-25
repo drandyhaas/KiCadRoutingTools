@@ -804,7 +804,14 @@ def plan_run(pcb_data, config, net_ids, net_clearances=None):
            if nid in pcb_data.nets and nid not in poured and nid not in own_w
            and ncl.get(nid, config.clearance) <= config.clearance + 1e-9
            and 2 <= len(pcb_data.nets[nid].pads) <= (env_knobs.PLAN_MAX_PADS or MAX_PADS)]
-    if len(ids) < 2:
+    if len(ids) < 2 and not (env_knobs.PLAN_ONLY and ids):
+        if env_knobs.PLAN_ONLY:
+            # (asked for the verdict alone, with no net to plan: none is without a way -- said, where saying nothing
+            # read as "the check did not run")
+            import json
+            with open(env_knobs.PLAN_ONLY, 'w', encoding='utf-8') as f:
+                json.dump(dict(nets=0, planned=0, boxed=[], shared=[], close=[], partial=[], rounds=0), f)
+            raise SystemExit(0)
         return
     base = build_base_obstacle_map(pcb_data, config, ids, net_clearances=ncl)
     routes, rep = plan_routes(pcb_data, config, ids, base, rounds=env_knobs.PLAN_ROUNDS or ROUNDS,

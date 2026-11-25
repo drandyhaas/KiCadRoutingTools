@@ -1288,6 +1288,50 @@ def field_walls(bare, bare_path, field, refs, bus, held=()):
     return out
 
 
+def ties_boxed(out, tied, ties, genv, log):
+    """THE TIES THAT LEAVE A NET NO WAY: (the indices of `ties`' tracks, of its vias -- field_ties.lay's 'tracks' and
+    'vs') that go for a net the route step's own plan finds no way for on the tied field `tied` and found one for on
+    the field untied (`tied` + '.untied'; route_bus.plan_boxed: that plan's first round, on its grid at its sizes).
+    The walls' test of the ties (tie_walls) asks for a way out of a pad at the fab ladder's finest rung, and passed a
+    field on which a ground tie's via stood a third of a millimetre in front of a signal's edge stub, the stub's
+    neighbours either side: the net had no way on the board the buses were then laid on, and shipped open. The ties
+    round such a net's free ends go (route_bus._free_ends, TIE_REACH; a rail run pad to pad loses the span beside
+    them, not the rail), as the ties laid after the lanes do. `out`: the group's directory, for the untied copy."""
+    import field_ties
+    import route_bus as rb
+    from kicad_parser import parse_kicad_pcb
+    unt = os.path.join(out, 'shared_field.untied.kicad_pcb')
+    shutil.copy(tied + '.untied', unt)
+    pro = tied[:-len('.kicad_pcb')] + '.kicad_pro'
+    if os.path.isfile(pro):
+        shutil.copy(pro, unt[:-len('.kicad_pcb')] + '.kicad_pro')
+    with awx_settings.given(genv):
+        was = rb.plan_boxed(unt)
+        now = rb.plan_boxed(tied) if was is not None else None
+    new = sorted((now or set()) - (was or set()))
+    if not new:
+        return set(), set()
+    with contextlib.redirect_stdout(io.StringIO()):
+        pcb = parse_kicad_pcb(tied)
+    ids = {n.name: i for i, n in pcb.nets.items() if n.name}
+    pts = [pt for n in new if n in ids for pt in rb._free_ends(pcb, ids[n])]
+    pad_at = collections.defaultdict(list)
+    for f in pcb.footprints.values():
+        for q in f.pads:
+            pad_at[q.net_id].append(q)
+    tr2, vs2 = field_ties.clear_of(
+        ties['tracks'], ties['vs'], pts, rb.TIE_REACH,
+        cut=lambda nid, x, y: any(abs(x - q.global_x) <= q.size_x / 2 + 1e-6 and abs(y - q.global_y) <= q.size_y / 2 + 1e-6
+                                  for q in pad_at.get(nid, ())))
+    gone_s = {i for i, t in enumerate(ties['tracks']) if not any(t is k for k in tr2)}
+    gone_v = {j for j, v in enumerate(ties['vs']) if not any(v is k for k in vs2)}
+    log('  field ties: leaving no way in the route step\'s plan for ' + ', '.join(n.split('/')[-1] for n in new)
+        + (f' -- the ties round {"its" if len(new) == 1 else "their"} free ends taken out ({len(gone_s)} track(s) and '
+           f'{len(gone_v)} via(s))' if gone_s or gone_v else
+           f' -- no tie within {rb.TIE_REACH:g} mm of {"its" if len(new) == 1 else "their"} free ends: the ties stand'))
+    return gone_s, gone_v
+
+
 def tie_walls(untied, tied, ties, refs, bus, prot):
     """THE FIELD'S TIES THAT WALL A PAD IN: (the indices of `ties`' tracks, of its vias, [(the pad 'REF.PAD', why)])
     -- the pieces (field_ties.pieces) of the ties laid on the field at `tied` (`ties`: field_ties.lay's, its 'tracks'
@@ -3514,6 +3558,20 @@ def main():
             log(f'  the board prepared: {len(set(moved_))} passive(s) moved off the row parts\' escapes -- '
                 + ', '.join(sorted(set(moved_))[:16]) + f' -> {prep}')
             board = prep
+        # ---- ...and THE BALLS JOINED BENEATH THEIR ARRAY (field_ties.lay_beneath): a net of an array's ball whose
+        # every other pad stands under that array on the far face is routed whole there, before a ball is fanned
+        # out -- its balls are then served, and every menu is measured against its copper
+        import field_ties as _ft
+        arr_ = [sref] + sorted({cap['st']['dref'] for cap in caps.values()
+                                if len(cap['st'].get('dests') or [cap['st']['dref']]) == 1
+                                and cap['st']['dref'] in pcb0.footprints
+                                and not em.row_part(pcb0.footprints[cap['st']['dref']])} - {sref})
+        bus_ = {cap['st']['byname'][n][1].name for cap in caps.values() for n in cap['st']['launch']
+                if n in cap['st']['byname']}
+        with awx_settings.given(genv):
+            J_ = _ft.lay_beneath(prep, arr_, bus_, log)
+        if J_ and J_['nets']:
+            board = prep
         with contextlib.redirect_stdout(io.StringIO()):
             bpcb = parse_kicad_pcb(board)
         # (THE TIE VIAS' SITES, stood in on the board the menus are measured on -- each its own net's via, so that
@@ -5552,6 +5610,7 @@ def main():
         rep = {'buses': {}, 'arrays': {ref: {'exits': {}, 'drops': []} for ref in arrays}, 'status': sv.StatusName(r)}
         laid = []                   # (a net's id, its copper, its run's layer, the fan track, its array)
         wayouts = []                # (a net's id, an exit at an array, its direction, its lane's layer there)
+        oth_ways = []               # (...the same of the arrays' other signals' escapes: the ties' to keep clear)
         row_ways = []               # (...the same of a row part's berths: the ties' to keep clear, no nudge's)
         for b in buses:
             s = {l_: (next(i for i, v in b.J.xs[0][l_].items() if sv.Value(v)),
@@ -5717,6 +5776,7 @@ def main():
                     prev_oth[(ref, k)] = ('x', sr_.move_sig(g0), RL.index(L_))
                     how[(kind_, 'fanned out')] += 1
                     laid.append((A.bm.items[k][1].net_id, A.bm.opts[k][i][2], L_, A.bm.sz['tw'], ref))
+                    oth_ways.append((A.bm.items[k][1].net_id, tuple(g0.exit_pt), g0.direction, L_))
                     rep['arrays'][ref]['exits'][k] = {
                         'tooth': list(g0.exit_pt), 'direction': g0.direction, 'layer': L_, 'kind': g0.kind,
                         'site': list(g0.site) if g0.site is not None else None, 'bus': kind_,
@@ -6249,7 +6309,8 @@ def main():
             # (the ways out as far as the model reads an exit's front, EXIT_REACH: at the nudge's two bars a tie left
             # an array round the end of a tooth's way out and back in, across the lane's own run on its layer)
             T_ = field_ties.lay(fpath_, parts_, wayout_runs(wayouts + row_ways, bpcb.board_info.copper_layers,
-                                                            reach=EXIT_REACH), log=log)
+                                                            reach=EXIT_REACH), log=log,
+                                ways=wayout_runs(oth_ways, bpcb.board_info.copper_layers, reach=EXIT_REACH))
             d_t = field_drc(fpath_, 'tied')[0] if T_ and (T_['segments'] or T_['vias']) else M_['d_f']
         if T_ is None:
             log('  field ties: no pad on a poured net beneath the group\'s parts')
@@ -6267,6 +6328,10 @@ def main():
                 out_s, out_v, named_ = tie_walls(fpath_ + '.untied', fpath_, T_, sorted(arrays), sorted(
                     {cap['st']['byname'][n_][1].name for cap in caps.values() for n_ in cap['st']['launch']
                      if n_ in cap['st']['byname']}), read_protected_nets(pro_path_for_board(board)))
+            # (...nor one that leaves a net NO WAY in the route step's own plan, the untied field leaving it one:
+            # ties_boxed)
+            more_s, more_v = ties_boxed(out, fpath_, T_, genv, log)
+            out_s, out_v = set(out_s) | more_s, set(out_v) | more_v
             if out_s or out_v:
                 import ship_vias
                 from kicad_writer import add_tracks_and_vias_to_pcb
