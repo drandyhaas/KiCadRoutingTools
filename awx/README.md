@@ -1940,7 +1940,11 @@ once, proved optimal in its vias.
 - **The root's floor:** a re-solve only adds cuts and history to the bench's
   first solve, so it can do no better; the root's proof, carried in each
   solve's JSON and taken where its signature matches, floors it, and a plan
-  at the root's cost is proved at once.
+  at the root's cost is proved at once. A root is a bus's own solve's alone:
+  a coupled solve proves the buses' models together, its objective all of
+  theirs and the couplings' prices, and records none -- taken as one bus's
+  floor, that sum left the bus's re-solve no plan and ended its loop after
+  one round (`tests/test_622_joint_root.py`).
 - **Unproved, still a plan:** a round's first solve, and the loop's last
   re-solve, keep a plan they cannot prove (`SOLVE_UNPROVED`). The nets such a
   plan leaves over two go back to the ends.

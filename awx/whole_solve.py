@@ -2283,11 +2283,15 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                 # tooth's)
                 J.setdefault('layers', {})[n] = [LAYN[sv.Value(YL[n][k])] for k in range(len(J['changes'][n]) + 1)]
         # (the root: this solve's own proof when it has no geometry cuts, else the one it was floored by -- never an
-        # unproved plan's, which proves nothing)
+        # unproved plan's, which proves nothing. Nor a COUPLED solve's (`joint`, whole_joint: `sv` is the solver of
+        # every bus's model in one, its objective all of theirs and the couplings' prices): its proof is of the whole,
+        # no floor of this bus's part. Recorded as this bus's root it floored the bus's own re-solve two million
+        # vias' worth above any plan its model has -- no plan, in no time -- and the loop ended after one round on
+        # the plan it held, a lane open, whenever the re-solve's model was still the root's)
         J['root'] = root if root is not None else \
             ({'over': int(sum(sv.Value(over[n]) for n in M)), 'vias': int(sum(per.values()) - sum(drp.values())),
               'obj': int(math.floor(sv.ObjectiveValue() / W_V + 1e-9)), 'sig': sig}
-             if not CUTS and not SOFT and NVC0 == 0 and proved and not CROWD else None)
+             if not CUTS and not SOFT and NVC0 == 0 and proved and not CROWD and joint is None else None)
         J['proved'] = bool(proved)
         if CROWD:
             J['crowded'] = [n for n in M if sv.Value(CROWD[n])]
