@@ -1289,6 +1289,32 @@ def strip_keep_apart(node):
     return node
 
 
+_DISTINCT_NETS = (('cmp', '!=', ('prop', 'A', 'net'), ('prop', 'B', 'net')),
+                  ('cmp', '!=', ('prop', 'B', 'net'), ('prop', 'A', 'net')))
+
+
+def strip_distinct_nets(node):
+    """A clearance condition without its `A.Net != B.Net` conjuncts.
+
+    KiCad tests clearance only between items on different nets, so the term
+    is true for every pair a clearance rule is asked about; KiCad's own
+    custom-rule examples carry it (`A.NetClass == 'HV' && A.Net != B.Net`).
+    Left in, it is a two-item comparison the scoped channel does not admit,
+    and the whole rule went NOT GRADED and unrouted. Only `&&` conjuncts are
+    dropped; a term under `||` or `!` is kept, and so is the node itself when
+    nothing else is left (an unconditioned rule is not this channel's)."""
+    if not (isinstance(node, tuple) and node and node[0] == 'and'):
+        return node
+    kept = [c for c in (strip_distinct_nets(c) for c in node[1:])
+            if c not in _DISTINCT_NETS]
+    if not kept:
+        return node
+    out = kept[0]
+    for k in kept[1:]:
+        out = ('and', out, k)
+    return out
+
+
 def _coupled_graded_orders(text: str) -> frozenset:
     """The file positions of the rules check_drc's coupled-pair channel
     grades (#1293): parsed as `design_rules.parse_dru` parses them, and kept
@@ -1317,6 +1343,7 @@ def _condition_is_scoped(src: str) -> bool:
         node = strip_keep_apart(node)
     elif terms != (False, False):
         return False
+    node = strip_distinct_nets(node)
     return (node is not None and _scoped_node_ok(node)
             and _parse_track_condition(src) is None)
 
@@ -1336,6 +1363,7 @@ def is_scoped_clearance_rule(rule) -> bool:
     # binds every pair that reads so except a pair's own partner
     cond = (strip_keep_apart(rule.condition) if rule.keep_apart is True
             else rule.condition)
+    cond = strip_distinct_nets(cond)
     return ('min' in spec and not rule.unsupported and rule.coupled is False
             and rule.keep_apart in (False, True)
             and (rule.layer_clause is None or _copper_layer_clause(rule.layer_clause))
@@ -1395,8 +1423,10 @@ class ScopedClearanceRules:
         self._layer_pair_memo: Dict[tuple, Optional[Tuple[float, str, int]]] = {}
         self._ruled_memo: Dict[tuple, tuple] = {}
         # #1897: the "keep pairs apart" rules, read without their coupled term
-        self._apart = {id(r): strip_keep_apart(r.condition)
+        self._apart = {id(r): strip_distinct_nets(strip_keep_apart(r.condition))
                        for r in self.rules if r.keep_apart}
+        # the condition each rule is read by, without `A.Net != B.Net`
+        self._cond = {id(r): strip_distinct_nets(r.condition) for r in self.rules}
         self._partner_memo: Dict[tuple, bool] = {}
 
     @classmethod
@@ -1491,7 +1521,8 @@ class ScopedClearanceRules:
         if r.keep_apart:
             return (not exempt and _rule_matches(r, a, b, layer, self.dr.copper_layers,
                                                  ctx, condition=self._apart[id(r)]))
-        return _rule_matches(r, a, b, layer, self.dr.copper_layers, ctx)
+        return _rule_matches(r, a, b, layer, self.dr.copper_layers, ctx,
+                             condition=self._cond.get(id(r)))
 
     def pair_value(self, net_a: int, type_a: str, net_b: int, type_b: str,
                    pad_type_a: Optional[str] = None, pad_type_b: Optional[str] = None,
