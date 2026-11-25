@@ -44,6 +44,13 @@ bench = awx_settings.get('BENCH0') or awx_settings.req('BENCH')
 names = [n for n in awx_settings.req('NETS').split(',') if n]
 pcb = parse_kicad_pcb(bench)
 st = ffp.plan_state(pcb, names)
+# ---- NOT ONTO ANOTHER BUS'S COPPER (negotiated buses: joint_lanes.foreign -- the lanes of the buses this one plans
+# round, and every bus's laid copper and ends, copper here as at every other stage). None of it is on the bench's
+# file: a run-out via cleared against the file alone stood on a lane another bus had laid on an inner layer, three
+# violations between the two buses on the merged board, and a whole round more to answer them
+if awx_settings.get('JOINT_FOREIGN'):
+    import joint_lanes
+    joint_lanes.foreign(pcb)
 byname, src_pad, sref = st['byname'], st['src_pad'], st['sref']
 # (the ends told apart by EVERY part of a group's destination, as the realize reads DEST: by its first part alone, a
 # lane ending at another member had both free ends read as the source's, and the one farther from its own pad or

@@ -833,7 +833,8 @@ alone on its array a group of one:
    copper. The couplings each coupled solve settled are held from there as
    firm layer cuts, a lane kept off the other lane's layer within
    `whole_joint.CUT_R` (0.35 mm) of the coupling. Every stage of every bus,
-   from the loop's audits to the lay, plans round the other buses' copper as
+   from the loop's audits to the lay and the run-out via of a lane escaped
+   again (`ends_reescape`), plans round the other buses' copper as
    they publish it (`joint_lanes`: plans, laid boards and each bus's own
    bench copper, in the board's frame), in a **standing order**
    (`negotiated_buses.standing_order`: the bus of fewer lanes first). Of two
