@@ -972,9 +972,10 @@ class RoutingDialog(wx.Dialog):
 
     def _same_net_pad_clearance_value(self):
         """#581: the Basic tab's via-in-pad policy as the engines' scalar --
-        -1.0 while 'Allow via-in-pad' is checked (the default, pre-#581
-        behavior), else the spin's clearance (> 0 keeps every placed via off
-        same-net SMD pads). Shared by ALL step tabs."""
+        -1.0 while 'Allow via-in-pad' is checked, else the spin's clearance
+        (> 0 keeps every placed via off same-net SMD pads; unchecked at
+        SAME_NET_PAD_CLEARANCE_DEFAULT is the default, as on the CLI). Shared
+        by ALL step tabs, and recorded in the board's project after a run."""
         if self.via_in_pad_check.GetValue():
             return -1.0
         return self.same_net_pad_clearance.GetValue()
@@ -1417,12 +1418,12 @@ class RoutingDialog(wx.Dialog):
         # Moved here from the Planes tab -- one policy for the whole session.
         self.via_in_pad_check = wx.CheckBox(options_scroll,
                                             label="Allow via-in-pad")
-        self.via_in_pad_check.SetValue(True)
+        self.via_in_pad_check.SetValue(False)
         self.via_in_pad_check.SetToolTip(
-            "When checked (default), vias may be placed on same-net pads. "
-            "Uncheck to keep EVERY placed via (escape, rescue, tap, stitch) "
-            "at 'Same-net Pad Clearance' from same-net SMD pads; BGA/QFN "
-            "fanout then runs dog-bone escapes (#581).")
+            "When checked, vias may be placed on same-net pads (boards built "
+            "with filled vias). Unchecked (default) keeps EVERY placed via "
+            "(escape, rescue, tap, stitch) at 'Same-net Pad Clearance' from "
+            "same-net SMD pads; BGA/QFN fanout then runs dog-bone escapes (#581).")
         options_inner.Add(self.via_in_pad_check, 0, wx.ALL, 3)
         snpc_sizer = wx.BoxSizer(wx.HORIZONTAL)
         snpc_sizer.Add(wx.StaticText(options_scroll,
@@ -1431,12 +1432,12 @@ class RoutingDialog(wx.Dialog):
         _snpc_r = defaults.PARAM_RANGES['same_net_pad_clearance']
         self.same_net_pad_clearance = wx.SpinCtrlDouble(
             options_scroll, min=_snpc_r['min'], max=_snpc_r['max'],
-            initial=defaults.CLEARANCE, inc=_snpc_r['inc'])
+            initial=defaults.SAME_NET_PAD_CLEARANCE_DEFAULT, inc=_snpc_r['inc'])
         self.same_net_pad_clearance.SetDigits(_snpc_r['digits'])
         self.same_net_pad_clearance.SetToolTip(
             "Edge-to-edge clearance between placed vias and same-net SMD "
             "pads and the net's solder-paste openings (#962). Active only while 'Allow via-in-pad' is unchecked.")
-        self.same_net_pad_clearance.Enable(False)  # sync with default-checked box
+        self.same_net_pad_clearance.Enable(True)  # sync with default-unchecked box
         self.via_in_pad_check.Bind(
             wx.EVT_CHECKBOX,
             lambda evt: self.same_net_pad_clearance.Enable(not evt.IsChecked()))
@@ -2590,6 +2591,13 @@ class RoutingDialog(wx.Dialog):
                 self.via_in_pad_check.SetValue(False)
                 self.same_net_pad_clearance.SetValue(_rec581)
                 self.same_net_pad_clearance.Enable(True)
+            else:
+                # Without a record the read returns the default (> 0), so a
+                # value <= 0 is the board's own: -1 = built with filled vias.
+                # A recorded 0 (legacy, stitching-only) shows checked too, as
+                # it did before the default changed.
+                self.via_in_pad_check.SetValue(True)
+                self.same_net_pad_clearance.Enable(False)
         except Exception:
             pass
 
@@ -2900,11 +2908,12 @@ class RoutingDialog(wx.Dialog):
         except Exception:
             pass
         # #581: the via-in-pad policy controls live on the Basic tab now
-        # (moved from the planes tab). Default ON = -1.0 (CLI parity).
+        # (moved from the planes tab). Default OFF at
+        # SAME_NET_PAD_CLEARANCE_DEFAULT (CLI parity): a run records it.
         try:
-            self.via_in_pad_check.SetValue(True)
-            self.same_net_pad_clearance.SetValue(defaults.CLEARANCE)
-            self.same_net_pad_clearance.Enable(False)
+            self.via_in_pad_check.SetValue(False)
+            self.same_net_pad_clearance.SetValue(defaults.SAME_NET_PAD_CLEARANCE_DEFAULT)
+            self.same_net_pad_clearance.Enable(True)
         except Exception:
             pass
         try:

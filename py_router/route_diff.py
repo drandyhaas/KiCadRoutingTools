@@ -3825,7 +3825,7 @@ Examples:
                              "via-in-pad rescue, tap vias) and is recorded "
                              "in the sibling .kicad_pro so later chain steps inherit it; "
                              "-1 explicitly allows via-in-pad. Default: the project's "
-                             "recorded value, else via-in-pad allowed.")
+                             "recorded value, else 0.1 (no via-in-pad).")
     parser.add_argument("--max-turn-angle", type=float, default=180.0,
                         help="Max cumulative turn angle (degrees) before reset, to prevent U-turns (default: 180)")
 

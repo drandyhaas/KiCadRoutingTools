@@ -2422,7 +2422,7 @@ Options:
                       via site fails visibly) and is recorded in the sibling
                       .kicad_pro so later chain steps inherit it; -1 explicitly
                       allows via-in-pad (#581). Default: the project record,
-                      else allowed
+                      else 0.1 (no via-in-pad)
   --plane-net-layers NET:LAYER[,LAYER...] ...  Declare the future plane plan
                       (e.g. GND:In1.Cu,In4.Cu P3.3V:In2.Cu): balls the future
                       pour will reach on their own layer skip their drop via
@@ -2577,7 +2577,7 @@ Options:
   --same-net-pad-clearance MM  > 0 forbids via-in-pad (overrides --allow-via-in-pad)
                       and is recorded in the sibling .kicad_pro for later steps;
                       -1 explicitly allows it (#581). Default: the project
-                      record, else allowed
+                      record, else 0.1 (no via-in-pad)
   --add-teardrops     Add teardrop settings to all pads and vias in the output
   --power-nets / --power-nets-widths  route.py's power nets and widths (pass
                       the route step's own). A surface stub of such a net, on a

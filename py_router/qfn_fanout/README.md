@@ -134,7 +134,7 @@ the GUI's ticked via override) is drawn as asked. Nothing steps under `--escalat
 | `--via-drill` | Underpad escape via drill diameter (mm) | the board's Default class, else 0.25 |
 | `--board-edge-clearance` | Stub/via copper to the Edge.Cuts outline (mm); stubs are shortened or dropped, underpad vias near the edge rejected (#288) | the board's `min_copper_edge_clearance`, else `--clearance` |
 | `--allow-via-in-pad` | Underpad escape: let the via overlap its **own** pad so it can stagger *inward* (via-in-pad) | off |
-| `--same-net-pad-clearance` | `> 0` forbids via-in-pad (overrides `--allow-via-in-pad`) and is recorded in the sibling `.kicad_pro` for later steps (#581); `-1` allows it | the project's record, else allowed |
+| `--same-net-pad-clearance` | `> 0` forbids via-in-pad (overrides `--allow-via-in-pad`) and is recorded in the sibling `.kicad_pro` for later steps (#581); `-1` allows it | the project's recorded value, else 0.1 (no via-in-pad); -1 allows via-in-pad |
 | `--add-teardrops` | Add teardrop settings to all pads and vias in the output | off |
 
 The fab floor and escalation flags every routing step shares (`--fab-tier`,

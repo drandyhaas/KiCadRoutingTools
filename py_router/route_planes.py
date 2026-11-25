@@ -4477,7 +4477,7 @@ Examples:
                              "same-net pads and the net's solder-paste openings (#962) and is recorded in the sibling .kicad_pro so later "
                              "chain steps (route/route_diff/fanout/repair) inherit it (#581); "
                              "0 keeps its legacy stitching-only meaning; -1 explicitly allows "
-                             "via-in-pad. Default: the project's recorded value, else -1.")
+                             "via-in-pad. Default: the project's recorded value, else 0.1 (no via-in-pad).")
 
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")

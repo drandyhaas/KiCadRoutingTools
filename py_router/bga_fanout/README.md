@@ -105,7 +105,7 @@ board written, as `route.py` refuses one.
 | `--escape-method` | `auto`, `channel`, `underpad` (dense arrays) or `dogbone` (gap vias); see [Escape methods](#escape-methods) | auto |
 | `--plane-drop` | `auto` = drop a via for every excluded plane-net ball after the signal escape (#424); `off` disables. `KICAD_FANOUT_PLANE_DROP=0/1` overrides either | auto |
 | `--plane-net-layers` | The future plane plan, `NET:LAYER[,LAYER...]` per plane net (e.g. `GND:In1.Cu,In4.Cu P3.3V:In2.Cu`): a ball the declared pour will reach on its own layer gets no drop via (see [Plane-ball drops](#plane-ball-drops-424)) | none |
-| `--same-net-pad-clearance` | `> 0` forbids via-in-pad: under-pad escapes and plane drops run dog-bone, a ball with no legal off-pad site fails visibly, and the value is recorded in the sibling `.kicad_pro` for later steps (#581). `-1` allows via-in-pad | the project's record, else allowed |
+| `--same-net-pad-clearance` | `> 0` forbids via-in-pad: under-pad escapes and plane drops run dog-bone, a ball with no legal off-pad site fails visibly, and the value is recorded in the sibling `.kicad_pro` for later steps (#581). `-1` allows via-in-pad | the project's recorded value, else 0.1 (no via-in-pad); -1 allows via-in-pad |
 | `--grid-step` | Routing grid step (mm); escape stub ends are snapped to it (#149). Match the `--grid-step` you give `route.py` | 0.1 |
 | `--layer-costs` | One cost per `--layers` entry, route.py semantics (#288): negative = no escape copper on that layer (e.g. a future plane layer), otherwise a weight in [1, 1000]; the channel engine fills cheaper layers first | none |
 | `--add-teardrops` | Add teardrop settings to all pads and vias in the output | False |

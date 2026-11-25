@@ -3374,7 +3374,7 @@ def main():
                         help='#581: > 0 forbids via-in-pad (overrides --allow-via-in-pad) and '
                              'is recorded in the sibling .kicad_pro so later chain steps '
                              'inherit it. -1 explicitly allows via-in-pad. Default: the '
-                             'project record, else allowed.')
+                             'project record, else 0.1 (no via-in-pad).')
     parser.add_argument('--allow-via-in-pad', action='store_true',
                         help='Underpad escape: let the escape via overlap its OWN pad '
                              '(via-in-pad), so a via boxed in on the outward side can '

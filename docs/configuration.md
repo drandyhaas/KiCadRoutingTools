@@ -176,7 +176,7 @@ python3 py_router/route_diff.py in.kicad_pcb out.kicad_pcb --nets "/DQS_P" "/DQS
 | `--via-span-type` | read off the span | The via type written for `--via-span`: `micro`, `blind` or `buried` |
 | `--via-span-escape` | off | With `--via-span`: `route` first lays an escape (a via of the span beside each surface pad of the selected nets, and the short track to it), then routes; `only` lays the escapes and routes nothing |
 | `--grid-step` | 0.1 | Grid resolution in mm |
-| `--same-net-pad-clearance` | the project's recorded value, else -1 | Edge-to-edge clearance (mm) between every via the run places and same-net pads (#581). `> 0` keeps vias off same-net SMD pads and off the net's solder-paste openings (#962), i.e. no via-in-pad, and is recorded in the sibling `.kicad_pro` so later chain steps inherit it; `-1` allows via-in-pad. On every routing CLI (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`) |
+| `--same-net-pad-clearance` | the project's recorded value, else 0.1 (no via-in-pad); -1 allows via-in-pad | Edge-to-edge clearance (mm) between every via the run places and same-net pads (#581). `> 0` keeps vias off same-net SMD pads and off the net's solder-paste openings (#962), i.e. no via-in-pad, and is recorded in the sibling `.kicad_pro` so later chain steps inherit it; `-1` allows via-in-pad. On every routing CLI (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`) |
 
 **Impedance-controlled routing:** When `--impedance` is specified, track widths are automatically calculated per layer using IPC-2141 formulas based on the board stackup. Outer layers use microstrip formulas (typically wider tracks) and inner layers use stripline formulas (typically narrower tracks). Via clearance calculations account for the varying track widths per layer.
 
@@ -1417,7 +1417,7 @@ class GridRouteConfig:
     routing_clearance_margin: float = 1.0  # diff-pair via spacing only: track-to-via distance multiplier (1.0 = min DRC)
     hole_to_hole_clearance: float = 0.20  # mm - drill-to-drill fab floor
     board_edge_clearance: float = 0.0    # mm - clearance from board edge (0 = use clearance)
-    same_net_pad_clearance: float = -1.0  # mm via to same-net pad (> 0 = no via-in-pad; -1 = allowed)
+    same_net_pad_clearance: float = -1.0  # mm via to same-net pad (> 0 = no via-in-pad; -1 = allowed); the CLI and GUI resolve unset to 0.1
     proximity_heuristic_factor: float = 0.0  # proximity-aware heuristic (0 = off; the CLIs pass 0.02)
     ripped_route_avoidance_radius: float = 1.0  # mm - radius around ripped route corridors
     ripped_route_avoidance_cost: float = 0.1    # cost for routing through ripped corridors

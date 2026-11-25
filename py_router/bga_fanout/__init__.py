@@ -5881,7 +5881,7 @@ def main():
                              'plane drops run dog-bone; balls with no legal off-pad via site '
                              'fail visibly) and is recorded in the sibling .kicad_pro so later '
                              'chain steps inherit it. -1 explicitly allows via-in-pad. '
-                             'Default: the project record, else allowed.')
+                             'Default: the project record, else 0.1 (no via-in-pad).')
     parser.add_argument('--escape-method', choices=['auto', 'channel', 'underpad', 'dogbone'], default='auto',
                         help='Fanout engine (default: auto). "channel" = 45-stub + '
                              'channel router with diff-pair support. "underpad" = dense-array '

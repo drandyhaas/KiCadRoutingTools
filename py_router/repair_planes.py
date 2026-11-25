@@ -3792,7 +3792,7 @@ Examples:
                         help="Edge-to-edge clearance (mm) between repair vias (taps, joins, "
                              "reconnects) and same-net pads (#581). > 0 keeps vias off "
                              "same-net pads and the net's solder-paste openings (#962); -1 explicitly allows via-in-pad. Default: the "
-                             "project's recorded value, else -1.")
+                             "project's recorded value, else 0.1 (no via-in-pad).")
 
     # Via options (for config)
     __import__('via_span').add_cli_flags(parser, "Lay the plane taps and region joins")
