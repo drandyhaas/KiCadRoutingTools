@@ -206,7 +206,11 @@ def end_to_end():
            f"both members of every shipped fallback pair are recorded: {shipped}")
         ok(doc.get('unprotected_pairs') == [],
            f"and no routed pair is left out: {doc.get('unprotected_pairs')}")
-        n = 2 * len(doc.get('routed_diff_pairs') or [])
+        # #1361: a pair shipped uncoupled is protected while its members still
+        # run alongside, so it is recorded too without being credited routed
+        alongside = [p for p in (doc.get('uncoupled_diff_pairs') or [])
+                     if prot.get(p + '_P') == 'diff-pair' and prot.get(p + '_N') == 'diff-pair']
+        n = 2 * (len(doc.get('routed_diff_pairs') or []) + len(alongside))
         ok(f'Protected nets (not ripped by later steps): {n} recorded' in log,
            f"the run says it recorded all {n}")
     return True

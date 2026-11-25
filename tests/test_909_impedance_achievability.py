@@ -9,9 +9,11 @@ answer that in one call against a NOMINAL FR4 stack.
 Invariants gated here:
   1. `nominal_stackup` is a usable stackup: copper/dielectric alternating,
      summing to the declared board thickness, and it scales to N layers.
-  2. `achievability_note` reproduces the issue's own measured figures on
-     esp_prog: 90 ohm differential at gap 0.15 on 2-layer 1.6mm FR4 needs a
-     1.133mm leg / 2.42mm channel.
+  2. `achievability_note` on esp_prog: 90 ohm differential at gap 0.15 on
+     2-layer 1.6mm FR4 needs a 0.630mm leg / 1.410mm channel. (The issue's
+     own 1.133mm / 2.42mm came from the IPC-2141 coupling factor; a 2-D field
+     solve of that leg gives 76.5 ohm, of 0.630mm 88.9 ohm, and 90 ohm needs
+     0.599mm. The point stands either way: the pair does not fit.)
   3. It is SILENT on a board that HAS a stackup -- there the real solver runs
      and this has nothing to add.
   4. It names its assumption; a caller cannot mistake it for a measurement.
@@ -89,15 +91,15 @@ def main():
         text, detail = achievability_note(pcb, 'F.Cu', 90.0,
                                           is_differential=True, spacing=0.15,
                                           min_pitch_gap=gap)
-        # The issue measured 1.133mm at zdiff 89.7 and 2.42mm for the pair.
-        check('90 ohm differential leg = 1.133mm (the issue\'s own figure)',
-              detail and abs(detail['width_mm'] - 1.133) < 0.002,
+        # Kirschning-Jansen with the thickness correction; see the docstring.
+        check('90 ohm differential leg = 0.630mm',
+              detail and abs(detail['width_mm'] - 0.630) < 0.002,
               f'{detail and detail.get("width_mm")}')
-        check('the pair channel = 2.42mm',
-              detail and abs(detail['channel_mm'] - 2.42) < 0.005,
+        check('the pair channel = 1.410mm',
+              detail and abs(detail['channel_mm'] - 1.410) < 0.005,
               f'{detail and detail.get("channel_mm")}')
         check('the pin-gap ratio is reported',
-              detail and abs(detail['channel_over_pin_gap'] - 7.4) < 0.1,
+              detail and abs(detail['channel_over_pin_gap'] - 4.34) < 0.1,
               f'{detail and detail.get("channel_over_pin_gap")}')
         check('the text names the assumption as NOMINAL',
               'NOMINAL' in text and 'er 4.5' in text, text[:80])
