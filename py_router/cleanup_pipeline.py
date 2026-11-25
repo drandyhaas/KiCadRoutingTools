@@ -698,13 +698,21 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             skip_net_ids=_smooth_skip_net_ids(pcb_data))
         counts['smoothed_spans'] = _sm_stats.get('spans', 0)
         counts['smoothed_saved_mm'] = _sm_stats.get('saved_mm', 0.0)
+        # a net above max_net_segs whose whole result graded worse kept its
+        # copper as it came: said, not silent
+        _sm_rv = _sm_stats.get('nets_reverted_large', 0)
+        counts['smoothed_nets_reverted_large'] = _sm_rv
+        _sm_rv_txt = (f", {_sm_rv} large net(s) reverted (whole-net connectivity "
+                      f"check)" if _sm_rv else "")
         _trace('smooth')
         strip.extend(_sm_strip)
+        if not _sm_n and _sm_rv:
+            print(f"{label}Octolinear smoothing: nothing collapsed{_sm_rv_txt}")
         if _sm_n:
             print(f"{label}Octolinear smoothing: collapsed "
                   f"{_sm_stats.get('spans', 0)} staircase span(s) on "
                   f"{_sm_nets} net(s), -{_sm_stats.get('saved_mm', 0.0):.2f} mm "
-                  f"of copper (#536)")
+                  f"of copper (#536){_sm_rv_txt}")
             # #1688: a neighbour's jog left a graze no room to shift into, and
             # this pass has just straightened neighbours. Only those nets.
             if _ms_unresolved:
