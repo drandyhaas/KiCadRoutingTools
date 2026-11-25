@@ -196,6 +196,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                            keep_input_copper: bool = False,
                            progress_callback=None,
                            smooth: bool = False,
+                           smooth_large_nets: bool = False,
                            merge_collinear: bool = True,
                            strict_collapse: bool = True,
                            extra_length_matched_net_ids=None,
@@ -695,7 +696,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             keep_input_copper=keep_input_copper,
             net_clearances=_nc, board_edge_clearance=_bec,
             config=config,
-            skip_net_ids=_smooth_skip_net_ids(pcb_data))
+            skip_net_ids=_smooth_skip_net_ids(pcb_data),
+            smooth_large_nets=smooth_large_nets)
         counts['smoothed_spans'] = _sm_stats.get('spans', 0)
         counts['smoothed_saved_mm'] = _sm_stats.get('saved_mm', 0.0)
         # a net above max_net_segs whose whole result graded worse kept its

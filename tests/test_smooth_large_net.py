@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""smooth_octolinear_chains on a net above max_net_segs.
+"""smooth_octolinear_chains on a net above max_net_segs (--smooth-large-nets).
 
-Such a net used to be skipped whole (`nets_skipped_large`): a power net that
-taps many pads crosses 400 segments mid-run and shipped its grid staircases.
-It is now smoothed with ONE connectivity check for the whole net instead of
-one per chain:
+By default such a net is skipped whole (`nets_skipped_large`), as before: a
+power net that taps many pads crosses 400 segments mid-run and ships its grid
+staircases. With smooth_large_nets (route.py --smooth-large-nets) it is
+smoothed with ONE connectivity check for the whole net instead of one per
+chain:
 
-  * a staircase on a net of 450+ segments collapses (octolinear, endpoints
-    kept), counted in `nets_large`;
-  * if the whole net's result grades worse, none of it is committed: the
-    copper is unchanged and the net is counted in `nets_reverted_large`.
+  * default: the net is skipped and counted, its copper untouched;
+  * flag: a staircase on a net of 450+ segments collapses (octolinear,
+    endpoints kept), counted in `nets_large`;
+  * flag: if the whole net's result grades worse, none of it is committed: the
+    copper is unchanged and the net is counted in `nets_reverted_large`;
+  * the cleanup pipeline: default skips it, the flag smooths it and reports a
+    revert, and with smoothing off the flag does nothing.
 
     python3 tests/test_smooth_large_net.py
 """
@@ -72,12 +76,26 @@ def stair_segs(pcb):
     return [s for s in pcb.segments if max(s.start_y, s.end_y) < 30.0]
 
 
+def _copper(pcb):
+    return [(s.start_x, s.start_y, s.end_x, s.end_y) for s in pcb.segments]
+
+
+def test_default_skips_large_net():
+    pcb, _ = board()
+    before = _copper(pcb)
+    _n, nets, _strip, added, st = smooth_octolinear_chains([], pcb, clearance=0.1)
+    check("default: a 470-segment net is skipped and counted",
+          st['nets_skipped_large'] == 1 and st.get('nets_large') == 0 and st['spans'] == 0, str(st))
+    check("default: its copper is untouched", _copper(pcb) == before and not added)
+
+
 def test_large_net_is_smoothed():
     pcb, (ex, ey) = board()
     n_before = len(pcb.segments)
-    _n, nets, _strip, _added, st = smooth_octolinear_chains([], pcb, clearance=0.1)
+    _n, nets, _strip, _added, st = smooth_octolinear_chains([], pcb, clearance=0.1,
+                                                             smooth_large_nets=True)
     stair = stair_segs(pcb)
-    check("a 470-segment net is smoothed, not skipped",
+    check("flag: a 470-segment net is smoothed, not skipped",
           st.get('nets_large') == 1 and st['nets_skipped_large'] == 0 and st['spans'] > 0, str(st))
     check("its staircase collapsed", len(stair) < 20 and len(pcb.segments) < n_before,
           f"{len(stair)} staircase segments left")
@@ -105,7 +123,8 @@ def test_large_net_worse_result_reverts_whole_net():
 
     check_connected.check_net_connectivity = fake
     try:
-        _n, nets, _strip, added, st = smooth_octolinear_chains([], pcb, clearance=0.1)
+        _n, nets, _strip, added, st = smooth_octolinear_chains([], pcb, clearance=0.1,
+                                                               smooth_large_nets=True)
     finally:
         check_connected.check_net_connectivity = real
     after = [(s.start_x, s.start_y, s.end_x, s.end_y) for s in pcb.segments]
@@ -114,12 +133,37 @@ def test_large_net_worse_result_reverts_whole_net():
     check("one check for the net as it came, one for the result", len(calls) == 2, str(calls))
 
 
-def test_pipeline_reports_a_reverted_large_net():
-    """The cleanup pipeline counts and prints a large net that kept its copper."""
+def _pipeline(pcb, **kw):
     import contextlib
     import io
     from cleanup_pipeline import run_post_route_cleanup
     from routing_config import GridRouteConfig
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        out = run_post_route_cleanup([], pcb, {1}, GridRouteConfig(clearance=0.1),
+                                     snap=False, phantom=False, graze=False,
+                                     octolinear=False, via_nudge=False,
+                                     cycles=False, neck=False, **kw)
+    return out, buf.getvalue()
+
+
+def test_pipeline_arms():
+    """The route step's cleanup: default and --no-smoothing leave the large
+    net's staircase; only smoothing with the flag collapses it."""
+    os.environ.pop('KICAD_SMOOTH_ROUTE', None)
+    for label, kw, collapsed in (("default", dict(smooth=True), False),
+                                 ("--smooth-large-nets", dict(smooth=True, smooth_large_nets=True), True),
+                                 ("--no-smoothing --smooth-large-nets",
+                                  dict(smooth=False, smooth_large_nets=True), False)):
+        pcb, _ = board()
+        _pipeline(pcb, **kw)
+        n = len(stair_segs(pcb))
+        check(f"pipeline, {label}: staircase {'collapsed' if collapsed else 'left as it came'}",
+              (n < 20) if collapsed else (n == 20), f"{n} staircase segments")
+
+
+def test_pipeline_reports_a_reverted_large_net():
+    """The cleanup pipeline counts and prints a large net that kept its copper."""
     pcb, _ = board()
     real = check_connected.check_net_connectivity
 
@@ -132,23 +176,19 @@ def test_pipeline_reports_a_reverted_large_net():
         return res
 
     check_connected.check_net_connectivity = fake
-    buf = io.StringIO()
     try:
-        with contextlib.redirect_stdout(buf):
-            out = run_post_route_cleanup([], pcb, {1}, GridRouteConfig(clearance=0.1),
-                                         snap=False, phantom=False, graze=False,
-                                         octolinear=False, via_nudge=False,
-                                         cycles=False, neck=False, smooth=True)
+        out, text = _pipeline(pcb, smooth=True, smooth_large_nets=True)
     finally:
         check_connected.check_net_connectivity = real
     check("counts['smoothed_nets_reverted_large'] == 1",
           out.counts.get('smoothed_nets_reverted_large') == 1, str(out.counts.get('smoothed_nets_reverted_large')))
-    check("the smoothing line says so", "1 large net(s) reverted" in buf.getvalue(),
-          [l for l in buf.getvalue().splitlines() if 'smoothing' in l.lower()])
+    check("the smoothing line says so", "1 large net(s) reverted" in text,
+          [ln for ln in text.splitlines() if 'smoothing' in ln.lower()])
 
 
 if __name__ == '__main__':
-    for t in (test_large_net_is_smoothed, test_large_net_worse_result_reverts_whole_net,
+    for t in (test_default_skips_large_net, test_large_net_is_smoothed,
+              test_large_net_worse_result_reverts_whole_net, test_pipeline_arms,
               test_pipeline_reports_a_reverted_large_net):
         print(t.__name__)
         t()
