@@ -562,6 +562,22 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
                              project_from=project_from)[0]
 
 
+def memoized_refill_islands(board_file: str, project_from: str = None
+                            ) -> Optional[Dict[Tuple[str, str],
+                                               List[List[Tuple[float, float]]]]]:
+    """The islands of a refill of `board_file` THIS PROCESS already made, or
+    None -- never a refill of its own: no pcbnew subprocess is spawned. Keyed
+    as `refill_islands_ex` keys its memo (the file's bytes and its effective
+    .kicad_pro / .kicad_dru), so a rewritten file or project reads as None.
+    For a reader that measures on KiCad's fill when the run already has it
+    and on something cheaper otherwise (the keep-away report, #2070)."""
+    import copy as _copy
+    _mk = _refill_memo_key(board_file, project_from)
+    if _mk is None or _mk not in _REFILL_MEMO:
+        return None
+    return _copy.deepcopy(_REFILL_MEMO[_mk])
+
+
 def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
                       verbose: bool = False, project_from: str = None
                       ) -> Tuple[Optional[Dict[Tuple[str, str],

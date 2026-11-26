@@ -501,8 +501,11 @@ edge-class part.
 ```
 
 Each entry is ONE rule in route.py's `--keep-away` syntax: `AGGRESSOR:VICTIM:
-GAP`, with net patterns and `class=` terms, as a string or as an object with
-`rule` and the usual prose slots. `"keep_away": "unknown"` says the author
+GAP[:adjacent]`, with net patterns and `class=` terms, as a string or as an
+object with `rule` and the usual prose slots. The router prices the other
+side's pours too, and `:adjacent` asks it to price the layers next to the
+routed one as well (#2070, [Keep-away](api-routing-config.md#pairwise-keep-away-keep_away--keep_away_free--keep_away_cost));
+the placement grade below measures pads in plan view either way. `"keep_away": "unknown"` says the author
 looked and cannot yet say which nets are noisy. A malformed rule is refused
 with the rule parser's own message. A string holding two rules, or one rule
 twice, is refused as well.

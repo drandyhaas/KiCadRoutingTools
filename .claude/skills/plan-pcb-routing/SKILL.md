@@ -1235,7 +1235,10 @@ impedance nets are being routed as plain microstrip.
 prefer to keep one group's copper GAP mm (edge to edge, same layer) from the
 other group's. It is a SOFT cost above the clearance, which stays the hard floor:
 while a net of either group routes, every cell inside the band around the other
-group's tracks, vias and pads costs extra. Nets of one group still route against
+group's tracks, vias, pads and pours (a pour's band is drawn from its zone
+outline) costs extra. A rule sees the routed layer only; append `:adjacent`
+(`AGG:VICTIM:GAP:adjacent`) to also price the other group's copper on the copper
+layers next to it, in plan view, when coupling to the next layer matters. Nets of one group still route against
 each other at the normal clearance. It exists for crosstalk on mixed-signal
 boards. It is NOT a spreading knob (that is `--track-proximity-cost`), and it
 costs search time and some wirelength, so **add a rule only when you are sure,
@@ -1258,8 +1261,9 @@ Most boards get none.
    function (`pad.pinfunction`, or the datasheet when that is empty). A net
    name alone is not evidence, and a generic `Net-(R12-Pad2)` is no evidence
    at all.
-4. **Both groups are routed copper.** A group that lives only on a plane is not
-   a keep-away subject.
+4. **The aggressor is routed or poured copper, the victim routed copper.** A
+   victim that lives only on a plane is not a keep-away subject; an aggressor
+   pour (a switch node's or a high-current net's) is, on its own layer.
 
 **Do NOT add one when:**
 - the board is purely digital;
@@ -1349,7 +1353,9 @@ list is graded on the PLACEMENT by `check_floorplan`, before any track exists.
 
 **Grade it, and report it.** A run with rules prints a `Keep-away (...)` line and
 writes `keep_away` into JSON_SUMMARY: `in_band_mm` and `nets_in_band`, plus
-per-net `in_band_mm`, `min_spacing_mm` and `closest_net`. The cost is soft, so
+per-net `in_band_mm`, `min_spacing_mm` and `closest_net`, with `not_measured`
+(what the rules did not look at: other layers for a rule without `:adjacent`)
+and, when a rule's net pours, `pour_measured_on`. The cost is soft, so
 in-band length that remains means the router found no other way through. That is
 a capacity answer (a corridor too narrow for the gap, or placement putting the
 groups side by side), and you must report it rather than hide it. Tell the two
