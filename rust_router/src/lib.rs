@@ -12,6 +12,7 @@ use std::collections::HashMap;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;  // v0.17.3: return freed pages to OS
 
 mod types;
+mod count_grid;
 mod obstacle_map;
 mod router;
 mod dubins;
