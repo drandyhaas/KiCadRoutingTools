@@ -1922,5 +1922,57 @@
    "referrer": "teams.public.onecdn.static.microsoft",
    "uniques": 16
   }
+ ],
+ "2026-11-26": [
+  {
+   "count": 806,
+   "referrer": "linkedin.com",
+   "uniques": 631
+  },
+  {
+   "count": 557,
+   "referrer": "Google",
+   "uniques": 395
+  },
+  {
+   "count": 348,
+   "referrer": "github.com",
+   "uniques": 219
+  },
+  {
+   "count": 196,
+   "referrer": "com.linkedin.android",
+   "uniques": 179
+  },
+  {
+   "count": 171,
+   "referrer": "forum.kicad.info",
+   "uniques": 123
+  },
+  {
+   "count": 46,
+   "referrer": "DuckDuckGo",
+   "uniques": 28
+  },
+  {
+   "count": 42,
+   "referrer": "l.facebook.com",
+   "uniques": 11
+  },
+  {
+   "count": 37,
+   "referrer": "Bing",
+   "uniques": 32
+  },
+  {
+   "count": 26,
+   "referrer": "t.co",
+   "uniques": 22
+  },
+  {
+   "count": 26,
+   "referrer": "search.brave.com",
+   "uniques": 14
+  }
  ]
 }
