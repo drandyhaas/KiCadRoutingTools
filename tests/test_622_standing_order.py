@@ -12,7 +12,12 @@ On parts stood in for (pads alone):
 2. negotiated_buses.close_in_front: the buses whose destination stands so, a bus to several parts by any of them, a
    part not on the board none;
 3. negotiated_buses.ordered: the close buses first whatever their lanes, then the bus of fewer lanes, a tie by name --
-   and with none close, by the lanes alone.
+   and with none close, by the lanes alone;
+4. negotiated_buses.lane_room: the room a lane of a bus has -- the box round its lanes' exits (the group's state: each
+   lane's tooth and berth options) over its lanes, a side never under ROOM_SIDE; no exit, none;
+5. ...and ordered by it: the bus with the least room a lane first -- forty lanes between two arrays before eight to a
+   row of pins twice as far, where the lanes alone put the eight first --, the close buses still before any, a bus
+   with no room given (no state of the group's) before those with one.
 """
 import os
 import sys
@@ -75,6 +80,25 @@ check(nb.ordered(['U3', 'U2', 'J2', 'J1'], lanes, {'U2', 'J1'}) == ['J1', 'U2', 
       '3: the close buses first (the fewer lanes of them first), then fewer lanes, a tie by name')
 check(nb.ordered(['U3', 'U2', 'J2', 'J1'], lanes) == ['J2', 'U3', 'J1', 'U2'], '3: none close: by the lanes alone')
 
+# 4. lane_room
+opt = lambda x, y: ['dogbone', 'right', '*run*', x, y, [x, y], []]      # noqa: E731  (an option as group.json holds it)
+mem = {f'D{i}': [[opt(10.0, 1.0 + 0.2 * i)], [opt(16.0, 1.0 + 0.2 * i)]] for i in range(40)}       # 6 x 7.8 mm, 40 lanes
+hdr8 = {f'IO{i}': [[opt(10.0, 3.0 + 0.5 * i)], [opt(22.0, 2.54 * i), ['on', 2.5]]] for i in range(8)}  # 12 x 17.78, 8
+one = {'CLK': [[opt(10.0, 5.0)], [opt(10.6, 5.2)]]}                                                # a lane 0.6 mm long
+check(abs(nb.lane_room(mem) - 6.0 * 7.8 / 40) < 1e-9, f'4: the box round the exits over the lanes ({nb.lane_room(mem)})')
+check(abs(nb.lane_room(hdr8) - 12.0 * 17.78 / 8) < 1e-9, f'4: ...a berth\'s note beside its option read past ({nb.lane_room(hdr8)})')
+check(nb.lane_room(one) == nb.ROOM_SIDE ** 2, f'4: one short lane: a side never under ROOM_SIDE ({nb.lane_room(one)})')
+check(nb.lane_room({}) is None and nb.lane_room(None) is None, '4: no exit: none')
+
+# 5. ordered by the room a lane has
+lanes = {'U2': 40, 'J1': 8, 'X1': 1, 'J9': 3}
+room = {'U2': nb.lane_room(mem), 'J1': nb.lane_room(hdr8), 'X1': nb.lane_room(one)}
+check(nb.ordered(['J1', 'U2'], lanes) == ['J1', 'U2'], '5: by the lanes alone the bus of eight stands first')
+check(nb.ordered(['J1', 'U2'], lanes, room=room) == ['U2', 'J1'], '5: by the room a lane has: the forty between two arrays')
+check(nb.ordered(['J1', 'U2', 'X1'], lanes, room=room) == ['X1', 'U2', 'J1'], '5: ...a short lane before both')
+check(nb.ordered(['J1', 'U2', 'X1'], lanes, {'J1'}, room) == ['J1', 'X1', 'U2'], '5: the close bus still before any')
+check(nb.ordered(['J1', 'U2', 'J9'], lanes, room=room) == ['J9', 'U2', 'J1'], '5: a bus with no room given: before those with one')
+
 print('standing order: ' + ('FAIL' if fails else 'PASS: a destination close in front of its source found by the exits\' '
-                                                 'own test, its bus first; the rest by their lanes'))
+                                                 'own test, its bus first; the rest by the room a lane has, then their lanes'))
 sys.exit(1 if fails else 0)

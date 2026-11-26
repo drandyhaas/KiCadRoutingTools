@@ -837,7 +837,13 @@ alone on its array a group of one:
    again (`ends_reescape`), plans round the other buses' copper as
    they publish it (`joint_lanes`: plans, laid boards and each bus's own
    bench copper, in the board's frame), in a **standing order**
-   (`negotiated_buses.standing_order`: the bus of fewer lanes first). Of two
+   (`negotiated_buses.standing_order`: a bus whose destination stands close
+   in front of the source first, then the bus with the least room a lane --
+   `lane_room`, the box round its lanes' exits over its lanes: many lanes
+   between two arrays fill their own cross-section and cannot give, a few
+   lanes to a row of pins have the board to go round by; by the lanes alone
+   the smaller bus stood first, was laid blind to the larger one's plan, and
+   left it a lane with no way). Of two
    buses the later plans round the earlier one's planned lanes; the earlier
    reads the later one's lanes only once they are laid, and its ends on its
    bench always. Two plans that cross on one layer are a finding in both

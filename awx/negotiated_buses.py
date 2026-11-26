@@ -546,10 +546,28 @@ def close_in_front(pcb, src, dests):
     return out
 
 
-def ordered(dests, lanes, near=()):
-    """`dests` in STANDING ORDER: the buses `near` (close_in_front) first, then the bus of fewer `lanes` {dest: its
-    lanes}, a tie by name"""
-    return sorted(dests, key=lambda d_: (d_ not in near, lanes.get(d_, 0), d_))
+ROOM_SIDE = 1.0             # mm: the least side of the box round a bus's exits (one lane's, or a pair's, has no area)
+
+
+def lane_room(state):
+    """the ROOM A LANE of a bus has, in mm2: the box round its lanes' exits -- every tooth's and every berth's, as the
+    group's model gave them (group.json's `state` {lane: [its tooth's options, its berth's]}, an option [kind, face,
+    layer, x, y, ...], in the bus's own frame) -- each side at least ROOM_SIDE, over its lanes. None with no exit"""
+    pts = [(o_[3], o_[4]) for ends_ in (state or {}).values() for e_ in ends_ for o_ in e_
+           if isinstance(o_, (list, tuple)) and len(o_) > 4 and all(isinstance(v_, (int, float)) for v_ in o_[3:5])]
+    if not pts:
+        return None
+    w_ = max(ROOM_SIDE, max(x_ for x_, _y in pts) - min(x_ for x_, _y in pts))
+    h_ = max(ROOM_SIDE, max(y_ for _x, y_ in pts) - min(y_ for _x, y_ in pts))
+    return w_ * h_ / len(state)
+
+
+def ordered(dests, lanes, near=(), room=None):
+    """`dests` in STANDING ORDER: the buses `near` (close_in_front) first, then the bus with the least `room` a lane
+    {dest: mm2, lane_room} -- where none is given, or two have the same, the bus of fewer `lanes` {dest: its lanes} --,
+    a tie by name"""
+    room = room or {}
+    return sorted(dests, key=lambda d_: (d_ not in near, room.get(d_) or 0.0, lanes.get(d_, 0), d_))
 
 
 def standing_order(field, dests, src=None):
@@ -557,19 +575,24 @@ def standing_order(field, dests, src=None):
     two buses whose plans cross, the later plans round the earlier one's lanes). First the buses whose destination
     stands close in front of the source `src` (close_in_front): their lanes cannot give at all, and another bus's
     lane laid along their channel first, on their layer, left them no plan -- a memory a millimetre off its array,
-    four of its six lanes open behind a five-lane bus's lane that had the whole board to go round by. Then the bus of
-    FEWER lanes first -- it has the fewest ways to give, and the larger bus the most layers and room to go round it --
-    by the lanes the group's model gave each (group.json beside the field), a tie by name"""
+    four of its six lanes open behind a five-lane bus's lane that had the whole board to go round by. Then the bus
+    with the LEAST ROOM A LANE first (lane_room: the box round its lanes' exits over its lanes, by the ends the group's
+    model gave each -- group.json beside the field): a bus of many lanes between two arrays fills its own cross-section
+    and has nowhere to give, a few lanes to a row of pins have the board to go round by. By the lanes alone -- the
+    bus of fewer first -- nine lanes to a header stood against forty-seven to a memory beside it: laid first and blind
+    to the memory's plan, on the layers it had room on, and each run left one memory lane with no way past a header
+    lane's track. A tie by the lanes (the bus of fewer first), then by name"""
     import group_ends
     gj = os.path.join(os.path.dirname(field), 'group.json')
     gb = (json.load(open(gj)).get('buses') or {}) if os.path.isfile(gj) else {}
     n_ = {d_: len((gb.get(group_ends.bus_key(d_)) or {}).get('state') or ()) for d_ in dests}
+    room = {d_: lane_room((gb.get(group_ends.bus_key(d_)) or {}).get('state')) for d_ in dests}
     near = set()
     if src and len(dests) > 1:
         from kicad_parser import parse_kicad_pcb
         with contextlib.redirect_stdout(io.StringIO()):
             near = close_in_front(parse_kicad_pcb(field), src, dests)
-    return ordered(dests, n_, near)
+    return ordered(dests, n_, near, room)
 
 
 def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log=print, json_out=None,
