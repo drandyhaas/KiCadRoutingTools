@@ -3683,6 +3683,18 @@ def own_parts(st, end):
     return got[0 if end == 0 else 1]
 
 
+def _pin_stub(pcb, nid, m):
+    """whether the end `m` of net `nid` is a plated through-hole pin's own stub: a surface move that begins on such a
+    pad of the net (escape_moves.through_pin)"""
+    import escape_moves as em
+    legs = getattr(m, 'legs', None) or ()
+    if getattr(m, 'kind', None) != 'surface' or len(legs) != 1 or nid not in pcb.nets:
+        return False
+    a = legs[0][0]
+    return any(em.through_pin(p) and abs(p.global_x - a[0]) < 1e-3 and abs(p.global_y - a[1]) < 1e-3
+               for p in pcb.nets[nid].pads)
+
+
 def _front(pcb, nid, m, kids, skip=frozenset()):
     """(level, span) of a single lane's exit `m`: what stands in the straight run out of it, FRONT_REACH along its
     escape direction on its layer, against copper outside the run (braid.build_obstacles: every foreign pad, segment
@@ -3730,6 +3742,20 @@ def _front(pcb, nid, m, kids, skip=frozenset()):
     track = _bd.build_obstacles(pcb, nid, kids, L0, skip_refs=skip)
     blocked = lambda o, L, k: o.point_violation(at(k)) or cnr(L)[k]
     hits = [k for k in range(1, n + 1) if blocked(track, L0, k)]
+    if hits and _pin_stub(pcb, nid, m):
+        # (A PLATED THROUGH-HOLE PIN's stub: a lane comes into its end from either side or at 45 degrees as readily
+        # as straight on -- a hand enters a header's pins so wherever a part stands in front of one, along the gap
+        # between the pins' row and the part. Read by the straight run alone, a pin with a resistor pack two
+        # millimetres in front of it on the back layer had no clear end there, its lane took an inner layer -- a
+        # plane's, the signal one being another bus's -- and went the long way round)
+        r2 = math.sqrt(0.5)
+        for dx, dy in ((r2 * (d[0] - d[1]), r2 * (d[0] + d[1])), (r2 * (d[0] + d[1]), r2 * (d[1] - d[0])),
+                       (-d[1], d[0]), (d[1], -d[0])):
+            pts2 = [(x0 + dx * step * k, y0 + dy * step * k) for k in range(n + 1)]
+            cn2 = _corner_blocked(pcb, nid, L0, pts2, t_bar, skip)
+            if not any(track.point_violation(pts2[k]) or cn2[k] for k in range(1, n + 1)):
+                hits = []
+                break
     import route_layers
     RL = [L for L in route_layers.layers() if L in layers]
     if hits and len(RL) > 2 and getattr(m, 'kind', 'surface') != 'surface':

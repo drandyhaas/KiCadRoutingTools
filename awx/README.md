@@ -1440,7 +1440,14 @@ best plan it found (6 of the 326 in six boards' bus steps).
   fanout's plan sidecar, `ends_model.front`) -- never at a block on every
   layer, a barrel or a hole, which the lane goes round. A pair leg's menu
   keeps only exits with room for the pair there
-  (`fanout_from_plan.pair_exit_clear`);
+  (`fanout_from_plan.pair_exit_clear`). **A plated through-hole pin's stub**
+  (`_pin_stub`: a surface move of one leg that begins on such a pad of the
+  net) is read wider: its barrel is on every layer and a lane comes into it
+  from either side or at 45 degrees as readily as straight on, so its front
+  is blocked only where the straight run, both diagonals and both sides
+  are. A header's pin with a resistor pack two millimetres in front of it
+  on the back layer read as an end with no room there; its lane took an
+  inner layer and went the long way round;
 - the feedback's prices (`FB_AVOID`, `FB_PAIR`), by place and escalated
   ([feedback](#feedback-whole_feedbackpy));
 - **a plane ball walled in** (`plane_ways`): each
