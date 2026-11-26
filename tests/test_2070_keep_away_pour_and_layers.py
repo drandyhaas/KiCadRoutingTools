@@ -272,8 +272,8 @@ def main():
         test_track_f_control(variants, td)
         print("  PASS test_track_f_control")
         if not test_kicad_fill(routed, td):
-            print("  SKIP test_kicad_fill: no KiCad python (the rows above "
-                  "ran and passed)")
+            print("SKIP: test_kicad_fill needs KiCad python, not found (the "
+                  "rows above ran and passed)")
             sys.exit(77)
         print("  PASS test_kicad_fill")
     print("ALL PASS")

@@ -253,7 +253,7 @@ def main():
 
         cli = find_kicad_cli()
         if not cli:
-            print("\n6. SKIP: kicad-cli not found; 1-5 ran")
+            print("\nSKIP: 6. needs kicad-cli, not found (checks 1-5 ran and passed)")
             if failures:
                 print(f"\nFAILED: {len(failures)} check(s): {failures}")
                 return 1
