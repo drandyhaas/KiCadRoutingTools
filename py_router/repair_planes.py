@@ -1809,6 +1809,20 @@ def _repair_planes_all(
                         print("    (cancelled)")
                         break
                     _tapped_pads.append(pad)
+                    # The queue was built before any tap of this pass; a tap
+                    # since may have joined this pad to the plane through the
+                    # copper it already had (note_tap_committed folds the
+                    # tapped pad's component into main). Tapping it again only
+                    # adds a redundant strap or via. It stays in _tapped_pads:
+                    # its connection rests on that earlier tap's copper, which
+                    # the graze cleanup must protect the same way. An inert
+                    # oracle answers True for every pad, so it never skips.
+                    if not plane_oracle.inert and plane_oracle.pad_on_plane(pad):
+                        total_pads_repaired += 1
+                        print(f"    Pad {pad.component_ref}.{pad.pad_number} "
+                              f"({pad_layer})... already reaches the plane "
+                              f"through an earlier tap (skipped)", flush=True)
+                        continue
                     if progress_callback:
                         progress_callback(_pr_idx + 1, _pr_total,
                                           f"{net_name}: pad repair{_pr_phase} "
