@@ -1021,7 +1021,12 @@ with more than six pads, is not planned; nor is a net whose plan ends on ground 
 that runs the plan for its own ends, as the bus step does: `KICAD_PLAN_MAX_PADS` (the most pads a planned net may
 have), `KICAD_PLAN_ROUNDS` (the plan's rounds), and `KICAD_PLAN_ONLY=<file>` (the plan's report -- the nets planned,
 those with no way, those left on another's ground -- written there as JSON, and the run ended before it routes
-anything).
+anything). `KICAD_PLAN_TAPS` (opt-in, default 0) plans the supply pads' vias with the routes: a piece of a poured
+net's copper among the run's nets that no via or plated hole joins to its pours is a route of the plan too, from the
+piece to a layer its net pours on within 1 mm of its pad (or to a via of the net there), so a pad's via and a signal
+give way to one another before either is laid. `1` asks it of the pads on no layer their net pours on; `2` too of a
+net poured on an inner layer and an outer one, its inner layers alone. The run prints `Plan: N of M supply pad(s)
+with no via given one by the same plan`; the vias it keeps are laid before the run routes.
 
 ### Proximity Penalty Options
 

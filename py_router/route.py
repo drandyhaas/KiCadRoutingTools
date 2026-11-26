@@ -4713,7 +4713,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # run's own. Top-level runs only: a lap routes what the run left, on the board the plan's routes already stand on.
     if final_reconcile and env_knobs.PLAN_TOGETHER:
         from plan_together import plan_run
-        plan_run(pcb_data, config, single_ended_nets, net_clearances=net_clearances)
+        plan_run(pcb_data, config, single_ended_nets, net_clearances=net_clearances,
+                 tap_ids=list(all_net_ids_to_route))
+        # The supply pads' vias the plan found with the routes (KICAD_PLAN_TAPS) are this run's copper outside any
+        # net's result, as a stub's layer-swap via is: laid on the board now -- before the run's maps and its record
+        # of the input's copper, so every map holds them and no sync takes them off -- and shipped through the same
+        # channel, which the writers of both fronts emit and every removal of the run's own copper reaches.
+        _taps_pt = getattr(config, '_planned_taps', None) or ()
+        if _taps_pt:
+            from pcb_modification import bump_copper_epoch as _bce_pt
+            for _r_pt in _taps_pt:
+                pcb_data.segments.extend(_r_pt['new_segments'])
+                all_swap_segments.extend(_r_pt['new_segments'])
+                pcb_data.vias.extend(_r_pt['new_vias'])
+                all_swap_vias.extend(_r_pt['new_vias'])
+            _bce_pt(pcb_data)
+            print(f"Plan: {len(_taps_pt)} supply pad(s) tapped by the plan laid "
+                  f"({sum(len(r['new_segments']) for r in _taps_pt)} track(s), "
+                  f"{sum(len(r['new_vias']) for r in _taps_pt)} via(s))", flush=True)
     # ...and the out-of-scope zone nets it left crossable (a routed net has a
     # pad inside their pour), whose connectivity the end of the run grades
     # again on the shipped copper. Outermost run only.

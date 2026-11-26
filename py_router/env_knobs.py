@@ -493,6 +493,9 @@ def refresh() -> None:
     g['PLAN_MAX_PADS'] = _i('KICAD_PLAN_MAX_PADS', 0)
     g['PLAN_ROUNDS'] = _i('KICAD_PLAN_ROUNDS', 0)
     g['PLAN_ONLY'] = _s('KICAD_PLAN_ONLY')
+    # ...and THE SUPPLY PADS' VIAS planned with them (plan_together.plan_run, `taps`): 1 the pads on no layer their
+    # net pours on, 2 those of a net poured on an inner layer too whose own layer's pour is an outer one. Opt-in.
+    g['PLAN_TAPS'] = _i('KICAD_PLAN_TAPS', 0)
     g['GLOBAL_PLAN'] = {
         'enable': _opt_in('KICAD_GLOBAL_PLAN'),
         # a plan made OUTSIDE the router: JSON {net name: [[x mm, y mm, layer name], ...]}, read in place of the

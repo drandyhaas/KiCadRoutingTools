@@ -43,6 +43,7 @@ SQUEEZE = 5            # a via among another route's tracks costs 1/SQUEEZE of a
 CROSS = 600            # a step onto another route's line costs CROSS cells within its pitch
 LANE = 10              # ground of a LANE (copper laid before, which gives way only if laid again) costs LANE times a route's
 KEPT = set()           # the names of the nets this process's run routed by its plan: no lap of it rips one
+TAP_REACH = 1.0        # (mm) how far from its pad a supply pad's via may stand
 
 
 def _on(layers_of, name):
@@ -142,7 +143,7 @@ def _base_blocked(base, layers_on, nL, I0, J0, W, H):
 
 
 def plan_routes(pcb, config, net_ids, base, rounds=ROUNDS, log=None, search=None, dbg=None, soft=None,
-                start_reach=None, whole=None, exits=0.0):
+                start_reach=None, whole=None, exits=0.0, taps=None):
     """Whole routes for the nets `net_ids` of `pcb`, found together (the module's text), on the base obstacle map
     `base` (built without those nets), at the run's sizes, layers, layer costs and via cost (`config`).
 
@@ -169,19 +170,26 @@ def plan_routes(pcb, config, net_ids, base, rounds=ROUNDS, log=None, search=None
     cmin = min(LC[i] for i in routable)
     via_mm = config.via_cost * REFERENCE_GRID_STEP    # (what the router charges a via, as millimetres of path)
     want = set(net_ids)
+    # THE SUPPLY PADS' VIAS (`taps` {a poured net's id: [(a layer it pours on, where: has .contains_xy or None)]}):
+    # each piece of such a net's copper that no via and no plated hole joins to its pours is a route of the plan too
+    # -- from the piece to a layer the net pours on, within TAP_REACH of its pad, or to a via the net has there.
+    # Laid after the signals, a pad's via stood where a signal ran and one of the two was given up; here each gives
+    # way to the other before either is laid.
+    taps = {n: v for n, v in (taps or {}).items() if n not in want}
+    tapn = set(taps)
     segs, vias = collections.defaultdict(list), collections.defaultdict(list)
     for s in pcb.segments:
-        if s.net_id in want and not getattr(s, 'graphic', False):
+        if s.net_id in want | tapn and not getattr(s, 'graphic', False):
             segs[s.net_id].append(s)
     for v in pcb.vias:
-        if v.net_id in want:
+        if v.net_id in want | tapn:
             vias[v.net_id].append(v)
     K = lambda x, y: (round(x, 3), round(y, 3))  # noqa: E731
     lidx = {name: i for i, name in enumerate(layers)}
 
     # ---- the nets: each net's pieces (pads the copper it has already joins); its route begins on the largest
     starts = []
-    for nid in sorted(want):
+    for nid in sorted(want | tapn):
         net = pcb.nets.get(nid)
         if net is None:
             continue
@@ -213,6 +221,21 @@ def plan_routes(pcb, config, net_ids, base, rounds=ROUNDS, log=None, search=None
                                            and abs(r.global_y - y) <= r.size_y / 2 + 1e-6 for (x, y), li in got)]
             left = [r for r in left if not any(r is t for t in same)]
             pieces.append(([q] + same, got))
+        if nid in tapn:
+            zl = [(lidx[L], where) for L, where in taps[nid] if L in lidx and LC[lidx[L]] > 0]
+            at_via = lambda seen: any(pt in via_at for pt, _li in seen)                    # noqa: E731
+            for pads_, seen in pieces:
+                if not zl or at_via(seen) or any(q.drill for q in pads_) or \
+                        any(_on(q.layers, layers[li]) for q in pads_ for li, _w in zl):
+                    continue                # (joined to every layer, or on a layer its net pours on)
+                at_pad = {K(q.global_x, q.global_y) for q in pads_}
+                starts.append(dict(
+                    nid=nid, name=f'{net.name} at {pads_[0].component_ref}.{pads_[0].pad_number}', parts=[],
+                    own=([(sg.start_x, sg.start_y, sg.end_x, sg.end_y, lidx[sg.layer]) for sg in segs[nid]
+                          if sg.layer in lidx and (K(sg.start_x, sg.start_y), lidx[sg.layer]) in seen],
+                         [(pt, li) for pt, li in seen if pt in at_pad and li in routable]),
+                    tap=(zl, [(q.global_x, q.global_y) for q in pads_], [(v.x, v.y) for v in vias[nid]])))
+            continue
         if len(pieces) < 2:
             continue
         k0 = max(range(len(pieces)), key=lambda k: (len(pieces[k][1]), -k))
@@ -225,7 +248,9 @@ def plan_routes(pcb, config, net_ids, base, rounds=ROUNDS, log=None, search=None
                     [(pt, li) for pt, li in seen if (pt in via_at or pt in at_pad) and li in routable])
         starts.append(dict(nid=nid, name=net.name, own=copper(*pieces[k0]),
                            parts=[copper(*pc) for k, pc in enumerate(pieces) if k != k0]))
-    rep['nets'] = len(starts)
+    rep['nets'] = sum(1 for s in starts if not s.get('tap'))
+    rep['taps'] = dict(asked=sum(1 for s in starts if s.get('tap')), kept=0, left=[])
+    rep['tap_routes'] = []
     if not starts:
         return {}, rep
 
@@ -240,14 +265,14 @@ def plan_routes(pcb, config, net_ids, base, rounds=ROUNDS, log=None, search=None
     # the board: the base map's cells, and the planned nets' own copper open to its net alone
     blk, vblk = _base_blocked(base, routable, nL, I0, J0, W, H)
     # (a LANE net's tracks and vias are no wall: ground a route may take at a price, `soft`; its pads are walls)
-    own = _paint(pcb, want - soft, layers, track, clearance, h, I0, J0, W, H)
+    own = _paint(pcb, (want | tapn) - soft, layers, track, clearance, h, I0, J0, W, H)
     if soft:
         own_p = _paint(pcb, soft, layers, track, clearance, h, I0, J0, W, H, pads_only=True)
         own = np.where(own == 0, own_p, np.where(own_p == 0, own, np.where(own == own_p, own, -1)))
     # where a via may stand: its barrel clear of the planned nets' copper on every layer (drawn as the walls are: a
     # place is closed where a via's centre there is nearer the copper than the spacing)
     vown = np.zeros((H, W), dtype=np.int32)
-    p_v = _paint(pcb, want - soft, layers, via, clearance, h, I0, J0, W, H)
+    p_v = _paint(pcb, (want | tapn) - soft, layers, via, clearance, h, I0, J0, W, H)
     if soft:
         p_s = _paint(pcb, soft, layers, via, clearance, h, I0, J0, W, H, pads_only=True)
         p_v = np.where(p_v == 0, p_s, np.where(p_s == 0, p_v, np.where(p_v == p_s, p_v, -1)))
@@ -365,6 +390,30 @@ def plan_routes(pcb, config, net_ids, base, rounds=ROUNDS, log=None, search=None
         s['srcpt'] = srcpt
         s['mine'] = set(srcpt)                    # (the cells of the copper the net has: no route's to dispute)
         s['path'], s['stamp'], s['full'] = None, set(), False
+        if s.get('tap'):
+            # A SUPPLY PAD'S VIA: from the piece to any place within TAP_REACH of a pad of it on a layer its net
+            # pours on (where the pour is the net's), or to a via the net has within the reach
+            zl, pts, own_v = s['tap']
+            kr = max(1, int(round(TAP_REACH / h)))
+            tgt = set()
+            for x, y in pts:
+                i_, j_ = G(x) - I0, G(y) - J0
+                jj, ii = np.meshgrid(np.arange(max(j_ - kr, 0), min(j_ + kr, H - 1) + 1),
+                                     np.arange(max(i_ - kr, 0), min(i_ + kr, W - 1) + 1), indexing='ij')
+                jj, ii = jj.reshape(-1), ii.reshape(-1)
+                for li, where in zl:
+                    ok = np.ones(len(jj), dtype=bool) if where is None else \
+                        where.contains_xy((ii + I0) * h, (jj + J0) * h)
+                    tgt.update((li * N + jj[ok] * W + ii[ok]).tolist())
+                for vx, vy in own_v:
+                    if math.hypot(vx - x, vy - y) <= TAP_REACH and any(
+                            where is None or bool(where.contains_xy(np.array([vx]), np.array([vy]))[0])
+                            for _li, where in zl):
+                        tgt.update(L * N + cell(vx, vy) for L in routable)
+            tgt -= set(srcpt)
+            s['tparts'] = [(tgt, sorted({(G(x) - I0, G(y) - J0) for x, y in pts}))] if tgt else []
+            if not tgt:
+                s['src'] = []
         if start_reach is not None and s['nid'] not in (whole or ()):
             # A START alone: from the net's piece on ONE layer (an escape with no via) to another layer, within
             # `start_reach` of that piece -- the via that opens every layer to it, and no more of its route
@@ -635,7 +684,7 @@ def plan_routes(pcb, config, net_ids, base, rounds=ROUNDS, log=None, search=None
                               tparts=[sorted(t) for t, _x in s['tparts']]) for s in starts])
     for s in starts:
         if not s['path']:
-            rep['boxed'].append(s['name'])
+            (rep['taps']['left'] if s.get('tap') else rep['boxed']).append(s['name'])
         elif not s['full']:
             rep['partial'].append(s['name'])
             stamp(s, -1)
@@ -674,7 +723,7 @@ def plan_routes(pcb, config, net_ids, base, rounds=ROUNDS, log=None, search=None
                 log(f"  plan: {s['name']} left out, on another route's ground at ({(u0 % N % W + I0) * h:.2f}, "
                     f"{(u0 % N // W + J0) * h:.2f}) {layers[u0 // N]}")
             stamp(s, -1)
-            rep['shared'].append(s['name'])
+            (rep['taps']['left'] if s.get('tap') else rep['shared']).append(s['name'])
             continue
         legs = []
         for leg in _legs(path):
@@ -696,9 +745,13 @@ def plan_routes(pcb, config, net_ids, base, rounds=ROUNDS, log=None, search=None
                or any(_seg_dist(v, v, a, b) < v_t - 1e-6 for v in ovs for a, b, _l in runs)
                or any(math.dist(v, w) < r_vv - 1e-6 for v in vs for w in ovs) for oruns, ovs in kept):
             stamp(s, -1)
-            rep['close'].append(s['name'])
+            (rep['taps']['left'] if s.get('tap') else rep['close']).append(s['name'])
             continue
         kept.append((runs, vs))
+        if s.get('tap'):
+            rep['tap_routes'].append((s['nid'], s['name'], legs))
+            rep['taps']['kept'] += 1
+            continue
         if soft and shared(s):
             # (clear of every route kept, and on a lane's ground: the route stands if the lane is laid again round it)
             cells_, vat_ = {u for u in path if u is not None}, s.get('vat', set())
@@ -786,7 +839,81 @@ def route_results(config, routes):
     return out
 
 
-def plan_run(pcb_data, config, net_ids, net_clearances=None):
+def tap_nets(pcb, tap_ids, mode=1):
+    """THE NETS WHOSE PADS' VIAS THE PLAN LAYS {net id: [(a layer it pours on, where its pour is its own: an object
+    with contains_xy(xs, ys), or None for anywhere)]} of the poured nets among `tap_ids`: a zone's outline less the
+    zones of other nets drawn over it on its layer at a higher priority. `mode` 2: of a net poured on an inner layer
+    too, the inner layers alone -- its outer pours are cut by every track laid across them."""
+    zones = [z for z in (getattr(pcb, 'zones', None) or ()) if z.net_id and len(z.polygon or ()) >= 3]
+    if not zones:
+        return {}
+    import shapely
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    cu = list(pcb.board_info.copper_layers)
+    outer = {cu[0], cu[-1]} if len(cu) > 2 else set()
+
+    class Where:
+        # (inside the outline, and on the main body of the fill: the zone's outline holds islands too -- round an
+        # array the lanes cut a pour into slivers no via joins to the plane, and a tap there is no tap)
+        def __init__(self, geom, fill=None):
+            self.geom = geom
+            shapely.prepare(self.geom)
+            self.fill = fill
+            self.main = fill.largest_component() if fill is not None else 0
+
+        def contains_xy(self, xs, ys):
+            xs, ys = np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
+            ok = shapely.contains_xy(self.geom, xs, ys)
+            if self.fill is not None and self.main:
+                f = self.fill
+                i = ((xs - f.x0) / f.cell).astype(int)
+                j = ((ys - f.y0) / f.cell).astype(int)
+                inb = (i >= 0) & (i < f.nx) & (j >= 0) & (j < f.ny)
+                lab = np.zeros(len(xs), dtype=np.int64)
+                lab[inb] = f.labels[i[inb], j[inb]]
+                ok = ok & (lab == self.main)
+            return ok
+    from plane_fill_model import get_zone_model
+    out = collections.defaultdict(list)
+    for z in zones:
+        if z.net_id not in set(tap_ids):
+            continue
+        g = Polygon(z.polygon, [h_ for h_ in (z.holes or ()) if len(h_) >= 3])
+        over = [Polygon(o.polygon) for o in zones if o is not z and o.layer == z.layer and o.net_id != z.net_id
+                and (o.priority or 0) > (z.priority or 0)]
+        if over:
+            g = g.difference(unary_union(over))
+        if not g.is_empty:
+            out[z.net_id].append((z.layer, Where(g.buffer(0), get_zone_model(pcb, z))))
+    if mode >= 2:
+        out = {n: ([lw for lw in v if lw[0] not in outer] or v) for n, v in out.items()}
+    return dict(out)
+
+
+def tap_results(config, tap_routes):
+    """the supply pads' vias the plan kept as route results, as route_results makes a net's: [a result -- its
+    tracks at the run's own track width, the plan's pitch --, 'tap': what it joins]"""
+    from kicad_parser import Segment, Via
+    from via_span import via_layer_pair, via_kind
+    out, g = [], config.grid_step
+    for nid, name, legs in tap_routes:
+        runs, vs = [], []
+        for way, e, f in legs:
+            r_, v_ = _shape(way, e, g, f)
+            runs += r_
+            vs += v_
+        segs = [Segment(start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1], width=config.track_width,
+                        layer=config.layers[li], net_id=nid)
+                for a, b, li in runs if math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-9]
+        vias = [Via(x=x, y=y, size=config.via_size, drill=config.via_drill, layers=via_layer_pair(config),
+                    via_type=via_kind(config), net_id=nid) for x, y in vs]
+        out.append({'new_segments': segs, 'new_vias': vias, 'iterations': 0, 'path': [tuple(c) for c in legs[0][0]],
+                    'planned': True, 'tap': name, 'net_id': nid})
+    return out
+
+
+def plan_run(pcb_data, config, net_ids, net_clearances=None, tap_ids=()):
     """A ROUTE RUN'S PLAN (KICAD_PLAN_TOGETHER=1): whole routes for its nets `net_ids` [(name, id)], left on
     `config._planned_routes` for the run's loop to take (the module's text). Made on a base obstacle map of its own,
     built as the run's is and holding every net but those planned: call it once the run's rules stand (its
@@ -813,9 +940,12 @@ def plan_run(pcb_data, config, net_ids, net_clearances=None):
                 json.dump(dict(nets=0, planned=0, boxed=[], shared=[], close=[], partial=[], rounds=0), f)
             raise SystemExit(0)
         return
-    base = build_base_obstacle_map(pcb_data, config, ids, net_clearances=ncl)
+    taps = tap_nets(pcb_data, [n for n in tap_ids if n not in ids], env_knobs.PLAN_TAPS) if env_knobs.PLAN_TAPS \
+        else {}
+    base = build_base_obstacle_map(pcb_data, config, ids + sorted(taps), net_clearances=ncl)
     routes, rep = plan_routes(pcb_data, config, ids, base, rounds=env_knobs.PLAN_ROUNDS or ROUNDS,
-                              log=print if config.verbose else None)
+                              log=print if config.verbose else None, taps=taps)
+    config._planned_taps = tap_results(config, rep.pop('tap_routes', []))
     if env_knobs.PLAN_ONLY:
         # (the plan's verdict alone, for a caller that asks which nets have no way on this board: written, and the
         # run ends before it routes anything)
@@ -831,3 +961,8 @@ def plan_run(pcb_data, config, net_ids, net_clearances=None):
     print(f"Plan: {rep['planned']} of {rep['nets']} net(s) routed by a plan made of them together "
           f"({rep['rounds']} round(s), {rep['vias']} via(s), {time.time() - t0:.1f} s)"
           + (f"; left to the search: {', '.join(left)}" if left else ''), flush=True)
+    if rep.get('taps', {}).get('asked'):
+        tl = rep['taps']['left']
+        print(f"Plan: {rep['taps']['kept']} of {rep['taps']['asked']} supply pad(s) with no via given one by the same "
+              f"plan" + (f"; left to the plane step: {', '.join(n.split('/')[-1] for n in tl[:8])}"
+                         f"{', ...' if len(tl) > 8 else ''}" if tl else ''), flush=True)
