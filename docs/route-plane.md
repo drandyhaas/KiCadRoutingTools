@@ -27,7 +27,7 @@ When creating a ground or power plane on an inner or bottom layer, SMD pads on o
 
 1. **Zone creation** - Creates a copper pour zone covering the board. Replaces an existing zone for the same net/layer with this run's settings, and lists each setting that changes (see [Replacing a same-net pour](#replacing-a-same-net-pour)); coexists with other nets' pours on that layer (warning + explicit fill priority)
 2. **Pad classification** - Identifies which pads need vias vs direct zone connection (the ones needing vias are handed to the route step; see the note above)
-3. **Thermal via arrays** (#487) - Exposed/thermal pads get a lattice of vias into the plane
+3. **Thermal via arrays** (#487) - Exposed/thermal pads get a lattice of vias into the plane. Under `--same-net-pad-clearance` the lattice is exempt from its own pad's keep-out but not from that pad's solder-paste openings (#2063; see [Same-net pad clearance](#same-net-pad-clearance--via-in-pad))
 4. **Area via stitching / edge fence / GND return vias** - Optional via features (`--stitch-vias`, `--stitch-edge-fence`, `--add-gnd-vias`)
 5. **Resistance analysis** - Calculates and displays plane resistance and max current capacity
 
@@ -100,7 +100,7 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 |--------|---------|-------------|
 | `--grid-step` | 0.1 | Grid resolution in mm |
 | `--hole-to-hole-clearance` | board `min_hole_to_hole`, else 0.2 | Minimum clearance between drill holes in mm (fab floor) |
-| `--same-net-pad-clearance` | project record, else -1 | Edge-to-edge clearance (mm) between placed vias and same-net pads. `> 0` keeps this step's stitching vias off same-net pads and the net's solder-paste openings (#962) at that clearance, and records the value in the sibling `.kicad_pro` (`kicad_routing_tools.same_net_pad_clearance`) so later chain steps — `route.py`, `route_diff.py`, `bga_fanout`/`qfn_fanout`, `repair_planes` — keep **all** their vias off them (#581). `0` keeps its legacy stitching-only meaning; `-1` explicitly allows via-in-pad. Unset = use the project's recorded value if one exists |
+| `--same-net-pad-clearance` | project record, else -1 | Edge-to-edge clearance (mm) between placed vias and same-net pads. `> 0` keeps this step's stitching vias off same-net pads and the net's solder-paste openings (#962) at that clearance (an exposed pad's own thermal array is exempt from that one pad, not from its paste, #2063), and records the value in the sibling `.kicad_pro` (`kicad_routing_tools.same_net_pad_clearance`) so later chain steps — `route.py`, `route_diff.py`, `bga_fanout`/`qfn_fanout`, `repair_planes` — keep **all** their vias off them (#581). `0` keeps its legacy stitching-only meaning; `-1` explicitly allows via-in-pad. Unset = use the project's recorded value if one exists |
 | `--layers`, `-l` | F.Cu + plane-layers + B.Cu | All copper layers for routing and via span (auto-computed) |
 | `--layer-costs` | 1.0 per layer (4+) or F.Cu=1.0/B.Cu=3.0 (2-layer) | Per-layer routing cost multipliers (1.0-1000, or negative = forbidden: the layer stays an obstacle and via span but gets no copper), one per `--layers` entry; any other count is refused |
 
@@ -428,6 +428,8 @@ For example, `--same-net-pad-clearance 0.25` requests a 0.25 mm gap. An explicit
 constraint for routing, fanout, or repair taps.
 
 **Board-wide semantics (#581).** A value `> 0` is a *board-wide assembly constraint*, not just a stitching option: it is recorded in the sibling `.kicad_pro` and every later chain step keeps **all** of its vias — routing escape vias, the #189 via-in-pad rescue (disabled), layer-swap pad vias (declined), plane tap/join/reconnect vias, and the sub-grid via nudge — at that clearance from same-net **SMD** pads. BGA fanout runs its under-pad escapes in dog-bone mode and QFN fanout refuses via-in-pad. The same flag is accepted by `route.py`, `route_diff.py`, `repair_planes.py`, `bga_fanout.py` and `qfn_fanout.py`; unset means "use the project's recorded value". `0` and `-1` reproduce the pre-#581 behavior exactly.
+
+**The exposed pad's own thermal array (#2063).** The #487 via array under an exposed pad is that pad's intended via site, and nothing else in the chain places it, so it is exempt from the keep-out of that **one** pad. It still keeps every other pad's keep-out, and it keeps out of the net's solder-paste openings at the same margin as any other via (via/2 + the clearance): the pad's own opening, a graphic opening, and paste-only windowpanes. On a footprint that windowpanes its paste, that leaves sites only in the gaps between the panes; on a pad whose own opening covers it, none. In that case the pad is deferred to the route step as before, and the console line says the reason: `thermal array did not fit (its solder-paste openings cover the pad: ...)`.
 
 In the GUI, the **Allow via-in-pad** checkbox and **Same-net Pad Clearance** spin control live at the top of the **Route tab's Options box** (moved from the Planes tab) and apply to *every* step run from the dialog. The checkbox defaults to ticked (via-in-pad allowed, CLI parity); unticking enables the spin control. When the board's project already records a clearance (a CLI chain step set it), the dialog opens with the checkbox unticked and the recorded value loaded.
 

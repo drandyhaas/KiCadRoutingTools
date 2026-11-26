@@ -3122,7 +3122,7 @@ toward ANY other net's copper on another layer, not toward its own net.
 ### Plane Via Placement Options (route_planes.py)
 
 - Multiple nets can share one plane layer (split round spines routed on it): `--nets GND VCC --plane-layers In2.Cu In2.Cu`
-- `--same-net-pad-clearance <mm>` (> 0) keeps every via the step places (stitching, thermal arrays, GND return vias) off same-net pads and their paste openings at that edge-to-edge clearance, and records it in the `.kicad_pro` so later steps inherit it (#581); default: the project's recorded value, else via-in-pad allowed
+- `--same-net-pad-clearance <mm>` (> 0) keeps every via the step places (stitching, thermal arrays, GND return vias) off same-net pads and their paste openings at that edge-to-edge clearance (an exposed pad's thermal array is exempt from its own pad, never from its paste, #2063), and records it in the `.kicad_pro` so later steps inherit it (#581); default: the project's recorded value, else via-in-pad allowed
 - The pour places NO tap vias and draws NO traces (#562), so it has no via-search or blocker-rip knobs: `--max-search-radius`, `--max-via-reuse-radius`, `--close-via-radius`, `--rip-blocker-nets`, `--max-rip-nets` and `--reroute-ripped-nets` are REMOVED. Do not emit them. Plane pads are welded by the route step's pour-launch and its in-run plane finalize.
 
 ### Net Ordering Strategies

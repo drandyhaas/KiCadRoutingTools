@@ -63,6 +63,7 @@ from plane_obstacle_builder import (
     identify_target_pads,
     build_via_obstacle_map,
     block_via_position,
+    exposed_pad_array_window,
     _add_segment_routing_obstacle,
     _add_board_edge_track_obstacles
 )
@@ -2541,6 +2542,46 @@ def compute_thermal_via_array(pad, obstacles, coord, config, via_size,
     return sites
 
 
+class _OpenViaMap:
+    """A via map with nothing on it: the lattice a pad offers by itself."""
+
+    @staticmethod
+    def is_via_blocked(gx, gy):
+        return False
+
+
+def _thermal_array_paste_reason(pad, pcb_data, net_id, coord, config, via_size,
+                                via_drill, hole_to_hole_clearance,
+                                same_net_pad_clearance) -> str:
+    """Why an exposed pad got no thermal via array, when the reason is its
+    paste (#2063): every lattice site the pad offers lies within via/2 + the
+    same-net pad clearance of one of the net's solder-paste openings (#962),
+    which the array must keep clear. '' otherwise (no clearance, a pad too
+    small for any site, or a site lost to something else)."""
+    snpc = same_net_pad_clearance
+    if snpc is None or snpc <= 0:
+        return ''
+    sites = compute_thermal_via_array(pad, _OpenViaMap(), coord, config, via_size,
+                                      via_drill, hole_to_hole_clearance, pcb_data)
+    if not sites:
+        return ''
+    try:
+        from paste_apertures import apertures_for_net, aperture_distance
+    except ImportError:
+        return ''
+    reach = via_size / 2.0 + snpc
+    aps = apertures_for_net(pcb_data, net_id)
+    hit = set()
+    for (x, y) in sites:
+        near = [i for i, ap in enumerate(aps) if aperture_distance(x, y, ap) < reach]
+        if not near:
+            return ''
+        hit.update(near)
+    return (f"its solder-paste openings cover the pad: all {len(sites)} lattice "
+            f"site(s) lie within {reach:g}mm of {len(hit)} opening(s), which "
+            f"vias keep clear under --same-net-pad-clearance, #962")
+
+
 def _stitch_pitch_from_freq(pcb_data: PCBData, max_freq_mhz: float,
                             floor_mm: float = 1.0):
     """lambda/20 stitching pitch for a maximum frequency of interest (#485).
@@ -3872,21 +3913,31 @@ def create_plane(
                                   f"{net_name}: thermal array for "
                                   f"{pad.component_ref}.{pad.pad_number}")
             print(f"  Pad {pad.component_ref}.{pad.pad_number}...", end=" ")
-            _arr = compute_thermal_via_array(
-                pad, obstacles, coord, config, via_size, via_drill,
-                hole_to_hole_clearance, pcb_data)
+            # #2063: the array is this pad's own via site, so it is exempt
+            # from the pad's #581 same-net keep-out (and only this pad's),
+            # but not from its paste openings: lift the one, add the other,
+            # and put the map back as built once the array is laid.
+            exposed_pad_array_window(obstacles, pcb_data, net_id, pad, config,
+                                     same_net_pad_clearance, open_window=True)
             _placed = 0
-            for (_ax, _ay) in _arr:
-                _agx, _agy = coord.to_grid(_ax, _ay)
-                if obstacles.is_via_blocked(_agx, _agy):
-                    continue      # a just-placed array via blocks this cell
-                new_vias.append({'x': _ax, 'y': _ay, 'size': via_size,
-                                 'drill': via_drill,
-                                 'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id})
-                block_via_position(obstacles, _ax, _ay, coord,
-                                   hole_to_hole_clearance, via_drill,
-                                   via_size, config.clearance)
-                _placed += 1
+            try:
+                _arr = compute_thermal_via_array(
+                    pad, obstacles, coord, config, via_size, via_drill,
+                    hole_to_hole_clearance, pcb_data)
+                for (_ax, _ay) in _arr:
+                    _agx, _agy = coord.to_grid(_ax, _ay)
+                    if obstacles.is_via_blocked(_agx, _agy):
+                        continue      # a just-placed array via blocks this cell
+                    new_vias.append({'x': _ax, 'y': _ay, 'size': via_size,
+                                     'drill': via_drill,
+                                     'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id})
+                    block_via_position(obstacles, _ax, _ay, coord,
+                                       hole_to_hole_clearance, via_drill,
+                                       via_size, config.clearance)
+                    _placed += 1
+            finally:
+                exposed_pad_array_window(obstacles, pcb_data, net_id, pad, config,
+                                         same_net_pad_clearance, open_window=False)
             processed_pad_ids.add(current_pad_key)
             if _placed:
                 vias_placed += _placed
@@ -3900,7 +3951,11 @@ def create_plane(
                 if _ds is None:
                     _ds = pcb_data._deferred_pad_seeds = {}
                 _ds.setdefault(net_id, []).append((pad.global_x, pad.global_y))
-                print("thermal array did not fit -- deferred to the route step")
+                _why = _thermal_array_paste_reason(
+                    pad, pcb_data, net_id, coord, config, via_size, via_drill,
+                    hole_to_hole_clearance, same_net_pad_clearance)
+                print("thermal array did not fit" + (f" ({_why})" if _why else "")
+                      + " -- deferred to the route step")
 
         # (The fine-pitch retry pass, issue #104, lived here. It is gone with
         # the tap machinery: the loop above places thermal-via ARRAYS only and
@@ -4512,8 +4567,9 @@ Examples:
                         default=None,
                         help="Edge-to-edge clearance (mm) between placed vias and same-net pads. "
                              "> 0 keeps ALL of this step's vias (stitching, taps, joins) off "
-                             "same-net pads and the net's solder-paste openings (#962) and is recorded in the sibling .kicad_pro so later "
-                             "chain steps (route/route_diff/fanout/repair) inherit it (#581); "
+                             "same-net pads and the net's solder-paste openings (#962) -- an exposed pad's own thermal "
+                             "array is exempt from that one pad, never from its paste (#2063) -- and is recorded "
+                             "in the sibling .kicad_pro so later chain steps (route/route_diff/fanout/repair) inherit it (#581); "
                              "0 keeps its legacy stitching-only meaning; -1 explicitly allows "
                              "via-in-pad. Default: the project's recorded value, else -1.")
 
