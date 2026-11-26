@@ -153,6 +153,7 @@ def main(argv=None):
     ap.add_argument('--dest', required=True, help="the destination part's reference (several, 'U4+U3')")
     ap.add_argument('--plan', default='', help='the whole-route plan the lanes were laid from (JSON)')
     ap.add_argument('--write', required=True, help='the packed board (.kicad_pcb)')
+    ap.add_argument('--hold', default='', help='lanes held as laid, N1,N2,..: their copper the others pack beside')
     a = ap.parse_args(argv)
     for k in ('board', 'laid', 'plan', 'write'):         # whole_ctx works from awx/: every path absolute first
         if getattr(a, k):
@@ -199,7 +200,11 @@ def main(argv=None):
     off = [n for n in singles if any(s.layer not in layers for s in by_s[nid(n)])]
     if off:
         print(f'{len(off)} lane(s) left as laid, a piece on no routing layer of the run: ' + ', '.join(off))
-    members = [n for n in singles if n not in necked and n not in viad and n not in off]
+    # ...and the lanes the caller holds (whole_route.pack_lay: a packed lane by a pad the pack walled in)
+    hold = [n for n in singles if n in set(x for x in a.hold.split(',') if x)]
+    if hold:
+        print(f'{len(hold)} lane(s) held as laid: ' + ', '.join(hold))
+    members = [n for n in singles if n not in necked and n not in viad and n not in off and n not in hold]
     # a layer with a clearance of its own above the run's (the board's rules file): the packer packs at one
     # clearance, every layer -- nothing is packed there
     own_c = {L: c_ for L, c_ in (getattr(ctx.cfg, 'layer_clearances', None) or {}).items()
@@ -244,7 +249,8 @@ def main(argv=None):
     kept = [n for n in target if n not in packed]
     if packed:
         write(ctx, a.laid, a.write, old_s, old_v, new_s, new_v, names)
-    left = [f'{n_pairs} pair(s)'] * bool(n_pairs) + [f'{len(necked)} necked lane(s)'] * bool(necked) \
+    left = [f'{n_pairs} pair(s)'] * bool(n_pairs) + [f'{len(hold)} held lane(s)'] * bool(hold) \
+        + [f'{len(necked)} necked lane(s)'] * bool(necked) \
         + [f'{len(viad)} lane(s) with a via'] * bool(viad) + [f'{len(off)} lane(s) off the routing layers'] * bool(off)
     print(f'SUMMARY pack: {len(packed)} of {len(target)} single lane(s) packed' + (f' ({why})' if why else '')
           + (f', {len(kept)} keep the router\'s copper ({", ".join(kept)})' if kept else '')

@@ -2993,6 +2993,50 @@ def round_edit_files(ed, d, env, bench):
     return tuple(out_)
 
 
+def pack_walls(lay, packed, nets):
+    """(walled, near): the balls and pads ('REF.PAD') the pack WALLED IN -- route_bus.walled_grade's test, reached on
+    the lay `lay` it packed and from nowhere on the packed board `packed`, the arrays the parts of the bus's nets `nets`
+    (whole-route keys) with 16 pads or more -- and the lanes the pack moved (their copper not the lay's) with a piece
+    within route_bus.WALL_NEAR of one of them, any layer: the lanes to hold as laid for that pad's way out"""
+    import route_bus
+    from coherent_nets import by_key
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        from kicad_parser import parse_kicad_pcb
+        b_lay, b_pk = parse_kicad_pcb(lay), parse_kicad_pcb(packed)
+    byk = by_key(b_lay)
+    keys = [n for n in nets if n in byk]
+    refs = sorted({p_.component_ref for n in keys for p_ in byk[n][1].pads
+                   if len(b_lay.footprints[p_.component_ref].pads) >= 16})
+    g = route_bus.walled_grade(lay, packed, refs, [byk[n][1].name for n in keys], log=lambda *a: None)
+    if not g['walled']:
+        return [], []
+    pads = []
+    for k in g['walled']:
+        r_, n_ = k.split('.', 1)
+        pads += [(q.global_x, q.global_y) for q in b_pk.footprints[r_].pads if q.pad_number == n_]
+
+    def segs(b, nid):
+        return {(round(s.start_x, 4), round(s.start_y, 4), round(s.end_x, 4), round(s.end_y, 4), s.layer)
+                for s in b.segments if s.net_id == nid}
+
+    def dist(px, py, s):
+        ux, uy = s[2] - s[0], s[3] - s[1]
+        ll = ux * ux + uy * uy
+        t = max(0.0, min(1.0, ((px - s[0]) * ux + (py - s[1]) * uy) / ll)) if ll > 1e-12 else 0.0
+        return math.hypot(px - s[0] - t * ux, py - s[1] - t * uy)
+    byk_pk = by_key(b_pk)
+    near = []
+    for n in keys:
+        if n not in byk_pk:
+            continue
+        now = segs(b_pk, byk_pk[n][0])
+        if now == segs(b_lay, byk[n][0]):
+            continue
+        if any(dist(px, py, s) <= route_bus.WALL_NEAR for s in now for px, py in pads):
+            near.append(n)
+    return list(g['walled']), near
+
+
 def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
     """the chain on rung K in OUTDIR, ROUNDS at most: the exit code, the grade the last line printed. The bench and its destination
     are `base` and `dest` when given (route_bus.py), else BASE and DEST from the environment; `settings` go over the
@@ -3168,25 +3212,46 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         or a mini re-route's where one was kept -- each pulled taut against its neighbour and laid again as packed
         copper (pack_lanes.py, a stage of its own, written into `d`/pack: the laid board stays as it is), read on the
         bench the round's lay `laid` stood on. The packed board is graded as a lay is (graded) and kept only where it
-        is NO WORSE: no more nets open and no more violations than the board it was packed from. The result when it
+        is NO WORSE: no more nets open and no more violations than the board it was packed from -- and NO PAD WALLED
+        IN that the lay left a way out (pack_walls, the step's own test; a bus result is clean only with none walled,
+        and the lay's grade reads open nets and violations alone): such a pack is packed again with the lanes it moved
+        by that pad held as laid, until none is walled, or holding frees none and the lay stands. The result when it
         is kept, else None -- the lay stands"""
         dp = os.path.join(d, 'pack')
         shutil.rmtree(dp, ignore_errors=True)
         os.makedirs(dp)
         out_p = os.path.join(dp, 'seq.kicad_pcb')
-        rc_ = run(['pack_lanes.py', '--board', laid['bench'], '--laid', res['board'],
-                   '--nets', ','.join(laid['nets']) if laid.get('nets') else NETS, '--dest', dest]
-                  + (['--plan', laid['plan']] if laid.get('plan') else []) + ['--write', out_p], env,
-                  log_path=os.path.join(dp, 'pack.log'))[0]
-        sm = ' '.join(grep(os.path.join(dp, 'pack.log'), r'^SUMMARY pack: '))
-        if rc_ != 0 or not sm:
-            say(f"  the pack: its stage ended {rc_} with no packed board ({os.path.relpath(dp, o)}/pack.log) -- the "
-                f"round's lay stands")
-            return None
-        say(f"  the pack: {sm[len('SUMMARY pack: '):]}")
-        if not os.path.isfile(out_p):
-            say("  the pack: no lane packed -- the round's lay stands")
-            return None
+        nets_ = list(laid['nets']) if laid.get('nets') else nets_all
+        hold, k_ = [], 0
+        while True:
+            lg_ = os.path.join(dp, f'pack{k_ or ""}.log')
+            if os.path.isfile(out_p):
+                os.remove(out_p)
+            rc_ = run(['pack_lanes.py', '--board', laid['bench'], '--laid', res['board'],
+                       '--nets', ','.join(laid['nets']) if laid.get('nets') else NETS, '--dest', dest]
+                      + (['--plan', laid['plan']] if laid.get('plan') else []) + ['--write', out_p]
+                      + (['--hold', ','.join(hold)] if hold else []), env, log_path=lg_)[0]
+            sm = ' '.join(grep(lg_, r'^SUMMARY pack: '))
+            if rc_ != 0 or not sm:
+                say(f"  the pack: its stage ended {rc_} with no packed board ({os.path.relpath(lg_, o)}) -- the "
+                    f"round's lay stands")
+                return None
+            say(f"  the pack: {sm[len('SUMMARY pack: '):]}")
+            if not os.path.isfile(out_p):
+                say("  the pack: no lane packed -- the round's lay stands")
+                return None
+            walled_, near_ = pack_walls(res['board'], out_p, nets_)
+            if not walled_:
+                break
+            near_ = [n_ for n_ in near_ if n_ not in hold]
+            if not near_:
+                say(f"  the pack: walls in {', '.join(walled_)}, a way out on the lay, and no lane it moved by "
+                    f"{'them' if len(walled_) > 1 else 'it'} is left to hold -- the round's lay stands")
+                return None
+            say(f"  the pack: walls in {', '.join(walled_)}, a way out on the lay -- packed again, the lanes it moved "
+                f"by {'them' if len(walled_) > 1 else 'it'} held as laid: {', '.join(near_)}")
+            hold += near_
+            k_ += 1
         ways_up(laid['bench'], out_p, os.path.join(dp, 'ways_up.log'), env, say)
         res_p = graded(r, dp, out_p, res['lanes'])
         if res_p['open'] > res['open'] or res_p['drc'] > res['drc']:

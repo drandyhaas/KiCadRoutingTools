@@ -2820,7 +2820,14 @@ for some of the lanes exists:
   packed octilinear copper, on a board of its own (`rN/pack/`). The packed
   board is graded as the lay is and is the round's board only where it has
   no more nets open and no more violations than the lay, which stands
-  otherwise. A pair, and a lane the lay necked, stay as laid;
+  otherwise -- and only where it walls in no pad the lay left a way out
+  (`pack_walls`: `route_bus.walled_grade` of the packed board against the
+  lay; a lane pulled tight along a destination's ball rows took a supply
+  ball's last way out). Such a pack is packed again with the lanes it moved
+  within `route_bus.WALL_NEAR` of that pad held as laid (`pack_lanes.py
+  --hold`), until none is walled, or the lay stands
+  (`tests/test_622_pack_walled_hold.py`). A pair, and a lane the lay
+  necked, stay as laid;
 - a round that lays nothing, or leaves nets open, is followed by **round 1
   again under the next seed**, up to `ROUNDS` (default 4): every solve of a
   round -- the
@@ -3251,7 +3258,7 @@ With nothing supplied, as on the benches:
 | `whole_audit.py`, `whole_gate.py`, `whole_lint.py`, `whole_render.py`, `whole_ctx.py` | a plan installed and audited, gated, linted, drawn; the bench they share, read as the ends model reads it (`tests/test_622_candidate_ctx.py`: an all-pair bus's plan sidecar read by the pairs' legs) |
 | `whole_ladder.py` | the ladders on this machine: rungs side by side, each stopped at a cap with every stage it started, one grade line each |
 | `route_layers.py`, `relayer.py` | the routing layers (`ROUTE_LAYERS`), the escapes' layers and `ESCAPE_VIAS`; a via end's run moved onto the layer the solve chose, its via dropped where it is left on its pad's layer |
-| `pack_lanes.py` | the pack stage (`route_bus.py --pack`, the setting `BUS_PACK=1`; off by default): a round's laid single-net lanes packed on a board of its own, which the chain keeps only where it grades no worse than the lay (`whole_route.chain`'s `pack_lay`); a pair, a necked lane and a lane whose copper is no one chain from its tooth to its berth left as laid, each named |
+| `pack_lanes.py` | the pack stage (`route_bus.py --pack`, the setting `BUS_PACK=1`; off by default): a round's laid single-net lanes packed on a board of its own, which the chain keeps only where it grades no worse than the lay and walls in no pad the lay left a way out (`whole_route.chain`'s `pack_lay`, `pack_walls`); a pair, a necked lane, a lane whose copper is no one chain from its tooth to its berth, and a lane the caller holds (`--hold`: one the pack moved by a pad it walled in) left as laid, each named |
 | `pack.py` | the packer: the lanes taken in their order across the bus, each relaxed as a taut string between its two ends, which never move -- a point on a layer against that layer's copper, a via against every routing layer's -- emitted as octilinear copper and validated piece by piece at the true radii; a lane whose packed copper fails keeps the router's |
 | `synth_layers.py` | the whole route on generated buses on two to six routing layers, each graded against its optimum on that many layers (`synth_bus.truth_layers`, `truth_wind`) and drawn layer by layer, `--sheet` every case on one image |
 | `synth_handoff.py` | the whole route on generated buses (`synth_bus.py --ring-n/--ring-s`, parts anywhere round the bus with `--part KIND@ANCHOR:U:V`, turned with `:rDEG`): ring faces, parts beside the facing column and in the ring's path on either layer, parts in front of every kind of stub, walls, the bus arriving at an angle, crossings, pairs -- each routed whole and graded on the route and on the handoff (every join drawn, no lane stepping back, nothing paid holding a trunk end); `--modal APP` one container a case (`modal_whole.py run_synth`) |
