@@ -4748,8 +4748,19 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
                 and _impedance_neckdown_allowed())
     if result[0] is not None or not (power_wide or imp_wide):
         return result + (False, None)
+    # A neck that the net's own rule minimum forbids on every layer gains
+    # nothing: the route keeps its width and fails honestly instead of
+    # shipping copper below the rule (a 0.18 mm DDR rule necked to the
+    # 0.1016 mm nominal: every neck and taper piece a DRC violation).
+    _neck_ws = [(config.get_track_width(l) if power_wide else config.track_width)
+                for l in config.layers]
+    if all(_floored_neck_width(config, net_id, l, w)
+           >= config.get_net_track_width(net_id, l) - 1e-9
+           for l, w in zip(config.layers, _neck_ws)):
+        return result + (False, None)
     span_mm = _edge_span_mm(sources, targets, config.grid_step)
     neck_floor = layer_w if power_wide else config.track_width
+    neck_floor = _floored_neck_width(config, net_id, config.layers[0], neck_floor)
 
     def _pad_entry_neck(prior):
         # #1452: --escalation off refused (or could not use) the ladder.
@@ -4757,8 +4768,7 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
         from fab_tiers import may_narrow
         if may_narrow() or not config.power_tap_neckdown:
             return prior + (False, None)
-        n_margins = (config.base_track_margins() if power_wide
-                     else config.track_margins_for_width(config.track_width))
+        n_margins = _neck_margins(config, net_id, _neck_ws)
         path, it = _pad_entry_neck_route(
             router, obstacles, config, sources, targets, track_margin, n_margins,
             pcb_data, net_id, print_prefix, direction_labels, single_direction,
@@ -4800,8 +4810,13 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
     if span_mm <= SHORT_POWER_EDGE_MM:
         # Short edge: step the width down, widest-that-fits wins; segments use it.
         total_iters = result[1]
+        _seen_tm = set()
         for w in _power_width_ladder(net_w, neck_floor):
-            tm = config.track_margins_for_width(w)
+            _fw = tuple(_floored_neck_width(config, net_id, l, w) for l in config.layers)
+            if _fw in _seen_tm:
+                continue    # a rung the rule floor lifted onto an earlier one
+            _seen_tm.add(_fw)
+            tm = _neck_margins(config, net_id, [w] * len(config.layers))
             r = _route_connection_at_margin(
                 router, obstacles, config, sources, targets, tm,
                 pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
@@ -4828,8 +4843,7 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
     # on impedance runs, 0 on plain runs); an impedance net necks to the
     # NOMINAL width (its margins vs the stamps' reserve, usually all-zero).
     print(f"{print_prefix}{YELLOW}Wide route blocked - retrying at default track width (neck-down){RESET}")
-    retry_margins = (config.base_track_margins() if power_wide
-                     else config.track_margins_for_width(config.track_width))
+    retry_margins = _neck_margins(config, net_id, _neck_ws)
     retry = _route_connection_at_margin(
         router, obstacles, config, sources, targets, retry_margins,
         pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
@@ -8504,15 +8518,59 @@ def _assign_wide_route_widths(segments, config: GridRouteConfig, net_id: int,
     return segments
 
 
+def _neck_rule_min(config: GridRouteConfig, net_id: int, layer: str) -> float:
+    """The track_width minimum KiCad's DRC holds this net to on `layer` (its
+    .kicad_dru rule / Board Setup minimum, `kicad_min`: not the fab tier's
+    floor, which the run's own nominal width may already sit under), 0.0 when
+    none binds it. A neck-down never narrows below it, except under
+    --escalation fab, which may go below rule minimums (as
+    config.rule_floors). Cached per (net, layer): the neck pass asks once per
+    segment."""
+    cache = config.__dict__.setdefault('_neck_rule_min_cache', {})
+    key = (net_id, layer)
+    v = cache.get(key)
+    if v is None:
+        v = 0.0
+        rules = config.rules
+        if rules is not None and (getattr(rules, 'rules', None)
+                                  or getattr(rules, 'board_min', None)):
+            try:
+                from fab_tiers import get_escalation_policy
+                if get_escalation_policy()[0] != 'fab':
+                    c = rules.resolve_for_copper(
+                        'track_width', rules.item_for_net(net_id, 'track', layer),
+                        None, layer)
+                    v = float(getattr(c, 'kicad_min', None) or 0.0)
+            except Exception:                                  # noqa: BLE001
+                v = 0.0
+        cache[key] = v
+    return v
+
+
+def _floored_neck_width(config: GridRouteConfig, net_id: int, layer: str,
+                        width: float) -> float:
+    """`width` raised to the net's rule minimum on `layer` (_neck_rule_min)."""
+    return max(width, _neck_rule_min(config, net_id, layer))
+
+
+def _neck_margins(config: GridRouteConfig, net_id: int, widths) -> List[float]:
+    """Per-layer A* margins for a neck at `widths` (one per config.layers
+    entry), each floored at the net's rule minimum on that layer."""
+    return [config._phase_exact_margin(l, _floored_neck_width(config, net_id, l, w))
+            for l, w in zip(config.layers, widths)]
+
+
 def _neck_width_for_net(config: GridRouteConfig, net_id: int, layer: str) -> float:
     """The width a neck-down narrows to on `layer` for this net: a POWER net
     (configured wider than the layer routing width) necks to the LAYER width,
     exactly as always; an IMPEDANCE-width net (layer width above nominal,
-    KICAD_IMPEDANCE_NECKDOWN allow, #465) necks to the NOMINAL track width."""
+    KICAD_IMPEDANCE_NECKDOWN allow, #465) necks to the NOMINAL track width.
+    Never below the net's own rule minimum on the layer (_neck_rule_min): a
+    0.18 mm DDR rule is not necked to a 0.1016 mm nominal."""
     lw = config.get_track_width(layer)
     if config.get_net_track_width(net_id, layer) > lw + 1e-9:
-        return lw
-    return min(lw, config.track_width)
+        return _floored_neck_width(config, net_id, layer, lw)
+    return _floored_neck_width(config, net_id, layer, min(lw, config.track_width))
 
 
 # #1033: granularity of the piecewise widen-back. A segment that does not fit
@@ -8666,7 +8724,8 @@ def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
     out = []  # built in reverse (pad-first)
     cum = 0.0
     for seg in reversed(segments):
-        narrow_w = (neck_w if neck_w is not None
+        narrow_w = (_floored_neck_width(config, net_id, seg.layer, neck_w)
+                    if neck_w is not None
                     else _neck_width_for_net(config, net_id, seg.layer))
         length = _seg_length(seg)
         if seg.width <= narrow_w:
@@ -8708,7 +8767,8 @@ def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
     layer_map = {name: i for i, name in enumerate(layer_names)}
 
     def _nw(layer):
-        return (neck_w if neck_w is not None
+        return (_floored_neck_width(config, net_id, layer, neck_w)
+                if neck_w is not None
                 else _neck_width_for_net(config, net_id, layer))
 
     out = _neck_pass(segments, config, obstacles, coord, layer_map, track_margin,
