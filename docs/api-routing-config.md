@@ -654,7 +654,7 @@ on the corpus.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `power_tap_neckdown` | `True` | Retry failed wide power taps with a narrow neck from the pad |
+| `power_tap_neckdown` | `True` | Retry a failed wide power route narrower: the widest of half, a quarter, ... of its width down to the layer width that routes (a long edge tries the layer width first and the widths between only when it routes, #1983), laid at the full width wherever that fits |
 | `neckdown_length` | `2.5` | Length of the pad-entry zone at each pad end: the power width capped at the pad's short side where it fits, narrow only where it does not (#1318). Under `--escalation off` capped at `PAD_ENTRY_NECK_MM` less `neckdown_taper_length` (#1452) |
 | `neckdown_taper_length` | `0.5` | Taper from narrow to full width (0 = abrupt) |
 

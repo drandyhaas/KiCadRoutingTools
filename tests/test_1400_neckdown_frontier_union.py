@@ -17,7 +17,8 @@ leave VCC's finger tap open, then again at 0.7 with the rescue ladder off.
 Rows:
   1. `_union_frontier_cells` keeps the first list's order and adds only the
      second's new cells.
-  2. At 0.7 the neck-down retry fails and the cascade names and rips /PC-RST.
+  2. At 0.7 the neck-down retry fails (#1983: the log line names the net
+     and the neck width) and the cascade names and rips /PC-RST.
   3. VCC ends connected (no open pad pairs), as at 0.2.
 
     python3 tests/test_1400_neckdown_frontier_union.py      (about 2 min)
@@ -89,8 +90,10 @@ def main():
         log = run('py_router/route.py', opened, w07, '--nets', 'VCC', 'GND', *COMMON,
                   '--via-cost', '600', '--power-nets', 'GND', 'VCC',
                   '--power-nets-widths', '0.7', '0.7', env={'KICAD_NET_RESCUE': '0'})
-        check('2. the wide attempt fails and the neck-down retry runs',
-              'Wide route blocked - retrying at default track width (neck-down)' in log)
+        check('2. the wide attempt fails and the neck-down retry fails too',
+              re.search(r'Wide power route blocked on VCC: long edge spanning '
+                        r'[\d.]+mm does not route at the 0\.2000mm neck width '
+                        r'either', log) is not None)
         check('2. the cascade names and rips /PC-RST', 'Ripping /PC-RST' in log)
         m = re.findall(r'"pad_pairs_open": (\{[^}]*\})', log)
         check('3. VCC ends connected', bool(m) and '"count": 0' in m[-1],

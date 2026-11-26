@@ -11055,8 +11055,10 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--power-nets-widths", nargs="*", type=float, default=[],
                         help="Track widths in mm for each power-net pattern (must match --power-nets length)")
     parser.add_argument("--no-power-tap-neckdown", action="store_true",
-                        help="Disable neck-down retry of failed power-net tap edges (issue #72): by default a "
-                             "wide tap that cannot fit is re-routed at the layer's default width near the pad")
+                        help="Disable the narrower retry of failed wide power-net edges (issues #72, #180, "
+                             "#1983): by default an edge that cannot fit at its power width is re-routed at the "
+                             "widest of half, a quarter, ... of it down to the layer's default width that fits, "
+                             "and keeps the power width wherever that fits")
     parser.add_argument("--capabilities", action="store_true",
                         help="Print this clone's module and flag inventory as JSON and "
                              "exit. A consumer that pins a KRT clone can only check that "

@@ -19,7 +19,7 @@ A board whose net classes already size its power nets needs neither: when `--tra
 | `--power-nets-widths` | - | Track widths in mm for each pattern (must match length) |
 | `--neckdown-length` | 2.5 | Narrow track length from the pad on a necked-down power route (mm) |
 | `--neckdown-taper-length` | 0.5 | Narrow-to-wide width taper (mm, 0 = abrupt) |
-| `--no-power-tap-neckdown` | off | Disable the neck-down retry of failed wide power routes |
+| `--no-power-tap-neckdown` | off | Disable the narrower retry (width ladder and neck-down) of failed wide power routes |
 
 The plugin's Route tab has the same fields (Power Nets, Power Widths, and the "Power route neck-down" checkbox).
 
@@ -52,12 +52,28 @@ power or ground in its `JSON_SUMMARY` `power_stubs_at_width` (#1743; see `py_rou
 
 A wide power track sometimes cannot fit where it matters most - escaping a fine-pitch pad,
 or threading a congested region. When a power route (a 2-pad route, a multipoint main
-connection, or a tap edge) fails at its power width, the router automatically retries it at
-the layer's default track width and applies neck-down widths to the result:
+connection, or a tap edge) fails at its power width, the router automatically retries it
+narrower, on a ladder of half, a quarter, ... of the power width down to the layer's default
+track width, and keeps the widest width that routes:
+
+- An edge whose ends are at most 10 mm apart (`SHORT_POWER_EDGE_MM`) walks the ladder from
+  the top (#180).
+- A longer edge is retried at the default width first. If that does not route either, the
+  edge fails there, and rip-up reads both attempts' frontiers (#1400). If it routes, the
+  widths between are tried, widest first (#1983): a 2 mm trunk through a gap that passes
+  1 mm but not 2 mm ships at 1 mm there, not at the default width. The log names the net, the
+  edge's span and the width reached -- `Wide power route blocked on +12V: long edge spanning
+  19.00mm routed at 1.0000mm (down from 2.0000)`, or `... routed at the 0.2500mm neck width
+  (down from 2.0000; 1.0000, 0.5000mm did not route), neck-down` when only the default
+  width routes. Each width between is one more search, and it runs only on an edge the
+  default width has already routed.
+
+The width reached is where the route narrows, not the width of all of it. The result is
+laid out with neck-down widths, the "narrow width" below being the width reached:
 
 - Segments within `--neckdown-length` (default 2.5mm) of a pad endpoint are laid at the
   pad-entry width -- the power width capped at that pad's short side -- wherever it fits, and
-  at the default width only where it does not (#1318). Whether it fits is measured exactly
+  at the narrow width only where it does not (#1318). Whether it fits is measured exactly
   against the neighbouring pads, tracks and vias where the routing grid would refuse it (the
   grid rounds, so it refuses some pin entries that clear); near the board edge, a bare drill
   hole, a keep-out or a filled copper graphic the grid's answer stands. An end on a via or a
