@@ -2506,6 +2506,32 @@ class DesignRules:
             v = c.max
         return float(v)
 
+    def track_draw_widths(self, net_id: int, layers: Sequence[str]
+                          ) -> Tuple[Optional[float], Dict[str, float]]:
+        """The track width to draw ``net_id`` at, and its per-layer widths.
+
+        The first value is :meth:`draw_size` with no layer (None when nothing
+        declares one). The dict is ``{layer: width}`` over ``layers`` when a
+        layer-scoped rule gives the net different widths on different layers,
+        else empty: a net with one width everywhere needs no per-layer map."""
+        by_layer = {l: self.draw_size('track_width', net_id, l) for l in layers}
+        by_layer = {l: w for l, w in by_layer.items() if w is not None}
+        if len(set(by_layer.values())) < 2:
+            by_layer = {}
+        return self.draw_size('track_width', net_id), by_layer
+
+    def clamp_track_width(self, net_id: int, layer: str, width: float) -> float:
+        """An explicit track ``width`` (the PNS 'custom size') for ``net_id`` on
+        ``layer``, clamped into the window of the rule that binds it there:
+        down to the rule's max, and up only to a CUSTOM rule's min (#2014)."""
+        c = self.resolve_for_copper(
+            'track_width', self.item_for_net(net_id, 'track', layer), None, layer)
+        if c.min_rule is not None and c.min is not None and width < c.min:
+            width = c.min
+        if c.max is not None and width > c.max:
+            width = c.max
+        return float(width)
+
     # ---------------- disclosure ----------------
 
     def unsupported(self) -> List[Tuple[str, str]]:
