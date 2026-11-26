@@ -1786,9 +1786,17 @@ def _repair_planes_all(
                 _pr_phase = ""
                 while _pad_queue or _deferred_rip:
                     if not _pad_queue:
+                        # The threshold is tuned on rip pressure, so count
+                        # only deferred pads that will rip: one a phase-1 tap
+                        # already joined to the plane is skipped below with
+                        # no rip (same condition as that skip).
+                        _rip_pending = sum(
+                            1 for p, _ in _deferred_rip
+                            if plane_oracle.inert
+                            or not plane_oracle.pad_on_plane(p))
                         _phase2_immediate = _PLANE_IMMEDIATE_RECONNECT or (
                             _PLANE_ADAPTIVE_RECONNECT
-                            and len(_deferred_rip)
+                            and _rip_pending
                             <= _PLANE_IMMEDIATE_MAX_PENDING)
                         _mode_note = ""
                         if _PLANE_ADAPTIVE_RECONNECT:
@@ -1796,7 +1804,7 @@ def _repair_planes_all(
                                           if _phase2_immediate else
                                           " [adaptive: deferred to end batch]")
                         print(f"    (#517 ordering: phase 2 -- "
-                              f"{len(_deferred_rip)} rip-requiring pad(s)"
+                              f"{_rip_pending} rip-requiring pad(s)"
                               f"{_mode_note})")
                         _pad_queue = [(p, l, True) for (p, l) in _deferred_rip]
                         _deferred_rip = []
