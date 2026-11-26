@@ -308,6 +308,27 @@ post-route pass, or already in the input) is printed and reported as
 `net_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (`[]` =
 clean; absent when the board has no such rule).
 
+**Clearance round one part.** A `.kicad_dru` clearance rule that keeps a net
+or class away from one part, e.g.
+`(rule "phase_c_off_C12" (constraint clearance (min 3mm)) (condition "A.NetName == '/OUT_E_PHASE_C' && B.Reference == 'C12'"))`
+or the same with KiCad's `B.memberOfFootprint('C12')` (#2071), is routed to by
+every routing step (no flag, no GUI control). Each pad of the part becomes a
+net-filtered keep-out on the pad's copper layers: the pad's copper outline with
+the rule's value as its clearance, so a bound net's track and via EDGES stay that
+far from the pad's copper, as KiCad measures a clearance. Which nets, layers and
+items (tracks, through vias) a pad binds comes from the resolver, either way
+round and the last matching rule winning, so a later rule that relaxes the pair
+is respected; a pad is kept out only where the rule is above the pair's class
+clearance. The console says `.kicad_dru rule 'phase_c_off_C12': honoured as a
+part keep-out: 1 net(s) kept 3 mm (copper edge to pad edge) from 2 pad(s) of C12`,
+and the shipped-board audit above counts bound-net copper left inside a pad's
+reach. `B.Reference` reads the pad's part, compared as a net name is
+(case-insensitive, a `*` / `?` literal a wildcard), and is undefined on a track
+or via (kicad-cli 10.0.6, `tests/oracle/constraint_agreement.py` `part_*` rows).
+A part term under `!`, beside an `||`, or `B.Reference != 'X'` (every other part)
+is not routed to and stays `NOT honoured`, as does a rule naming only a pad
+number (`A.Pad_Number`); check_drc grades every rule that names a part.
+
 **Clearance in a rule area.** A `.kicad_dru` clearance rule whose condition
 is one rule-area predicate or an OR of them, e.g.
 `(rule "room" (constraint clearance (min 0.09mm)) (condition "A.insideArea('ROOM')"))`

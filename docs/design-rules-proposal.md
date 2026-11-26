@@ -349,6 +349,7 @@ the subset our item model can answer without guessing:
 | `A.Pad_Number ==/!= 'X'` | pad number (#1660): a string compared as `A.NetName` is, undefined on anything but a pad | 1 |
 | `&&`, `\|\|`, `!`, parentheses, quoted strings, unit arithmetic in values | expression parser | 1 |
 | `A.memberOfFootprint('glob')` (the reference, and the library id when the name holds a `:`, as `'Device:R_*'`; case-sensitive, #1690), `A.intersectsCourtyard('ref')` | footprint ref and library id / courtyard polygon | 2 |
+| `A.Reference ==/!= 'X'` | the pad's part (#2071): compared as `A.NetName` is (case-insensitive, `*`/`?` wildcards), undefined on a track or via; a clearance rule naming a part is routed to as keep-outs round its pads and graded pair by pair | 2 |
 | `A.memberOfGroup('G')` | group membership (parseable from the file; GUI via `GetParentGroup`) | 2 |
 | `A.intersectsArea('zone')`, `enclosedByArea` | rule-area zone polygons (we parse zones) | 2 |
 | `A.inDiffPair('glob')`, `AB.isCoupledDiffPair()` | diff-pair detection (exists); `AB.isCoupledDiffPair()` as a positive AND term is evaluated since #1293 (KiCad's `MatchDpSuffix`, ported), negated as an AND term ("keep pairs apart") and `inDiffPair()` since #1295; OR'ed or compared it stays unsupported | 2 |
@@ -377,8 +378,8 @@ Kinds the router *consumes* and how:
 | `track_angle (min 135)` | octolinear vs orthogonal smoothing selector | phase 3 |
 | everything else | table only, reported | — |
 
-As shipped, the evaluated predicates are the phase-1 rows plus `memberOfFootprint` and
-`memberOfGroup`. The area predicates are evaluated only for a `disallow` rule on a named
+As shipped, the evaluated predicates are the phase-1 rows plus `memberOfFootprint`,
+`Reference` and `memberOfGroup`. The area predicates are evaluated only for a `disallow` rule on a named
 rule area, which becomes a net-filtered keep-out (#1278, `net_keepouts.py`); the
 courtyard and diff-pair predicates stay unsupported. Of the kinds, the engines read
 `track_width`, `via_diameter` and `hole_size` through the resolver and copper

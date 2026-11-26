@@ -377,6 +377,10 @@ Validate routed boards against the *real* spec, with the right checker — most
   net's, the shared band is each kind's lowest, a net above it gets the rest while
   it routes (`net_keepouts.derive_edge_bands`), and `config.board_edge_declared`
   is what the DRC writeback records.
+  **A clearance rule naming one part (#2071)** -- `B.Reference == 'C12'` or
+  `B.memberOfFootprint('C12')` -- becomes keep-outs round that part's pads at the
+  same chokepoint (`net_keepouts.derive_part_clearance_keepouts`, the resolver
+  deciding nets and layers) and check_drc grades it pair by pair.
   **Via rules (#1676) are read at the same place.** `DesignRules.via_floors` is
   what binds a via (condition, and the project's `rule_severities`); a step given
   no explicit via starts there (`via_from_class`), and `fab_tiers.escalation_rungs`

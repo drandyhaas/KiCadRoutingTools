@@ -372,6 +372,12 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
                 # #1843: read by position (area_clearance, design_rules.AreaIndex)
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm scoped by "
                              f"a rule area -- handled by position (#1843)")
+            elif _names_a_part(condition):
+                # #2071: read pair by pair (check_drc, through the resolver);
+                # the route steps say what they honour of it
+                notes.append(f"rule '{name}': clearance {clearance_mm}mm scoped by "
+                             f"a part -- not a channel of this map; check_drc grades "
+                             f"it pair by pair (#2071)")
             elif order in _coupled_orders():
                 # #1293: read, but not here -- it binds a pair's P against
                 # its own N, which the pair step and check_drc resolve
@@ -389,6 +395,18 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
             result[l] = clearance_mm
             orders[l] = order
     return result, track_rules, notes, skipped, orders
+
+
+def _names_a_part(condition) -> bool:
+    """#2071: the condition parses and reads which part an item belongs to
+    (`design_rules.part_scoped_clearance_rule`'s test)."""
+    if not condition:
+        return False
+    try:
+        from design_rules import Unsupported, _reads_part, parse_condition
+        return _reads_part(parse_condition(str(condition)))
+    except Unsupported:
+        return False
 
 
 def read_board_unmodelled_clearance_rules(board_path: str, copper_layers: List[str]
@@ -1222,8 +1240,11 @@ def install_track_clearances(config, track_clearances, input_file,
 # literal a wildcard), joined by && || !. A rule with a layer clause, a layer,
 # area, diff-pair or coupled term stays out (layer and coupled rules have their
 # own channels; the rest is #865), and so does a pad-scoped term, memberOfFootprint
-# or Pad_Number: this channel prices a net and a pad type, never one pad. Such a
-# rule is NOT GRADED by check_drc, which tags the violations it may make legal
+# or Pad_Number: this channel prices a net and a pad type, never one pad. A rule
+# naming a part (Reference, memberOfFootprint, #2071) is graded pair-exact by
+# check_drc through the resolver and kept out of by the route steps
+# (`net_keepouts.derive_part_clearance_keepouts`); one naming only a pad number
+# is NOT GRADED by check_drc, which tags the violations it may make legal
 # `unverified`, reading the pad's own number (`design_rules.rule_may_match`).
 #
 # The grader reads it PAIR-EXACT (`ScopedClearanceRules.pair_value`). The
