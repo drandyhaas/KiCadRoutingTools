@@ -454,6 +454,84 @@ def _refill_memo_key(board_file: str, project_from: str = None):
         return None
 
 
+#: Disk cache of successful refills, keyed on CONTENT (board, effective
+#: .kicad_pro/.kicad_dru, the refill script, this module's source and the
+#: KiCad python used). The in-process memo above dies with the process, so a
+#: chain that re-runs a step on the SAME input board (attempt 2 of a net, a
+#: retry with other flags) paid the full pcbnew refill -- ~40 s on a 12 MB
+#: 6-layer board -- every time. KICAD_EXACT_FILL_DISK_CACHE=0 turns it off;
+#: KRT_CACHE_DIR moves it (default ~/.cache/kicad-routing-tools).
+_DISK_CACHE_KEEP = 24
+
+
+def _disk_cache_dir():
+    if os.environ.get('KICAD_EXACT_FILL_DISK_CACHE', '1') in ('0', 'off', 'false'):
+        return None
+    base = os.environ.get('KRT_CACHE_DIR') or os.path.join(
+        os.path.expanduser('~'), '.cache', 'kicad-routing-tools')
+    return os.path.join(base, 'exact_fill')
+
+
+def _disk_cache_key(board_file: str, project_from: str, kpy: str):
+    """sha256 over everything the refill's parsed result depends on; None
+    when a file cannot be read (the caller then skips the disk cache)."""
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        bp = os.path.abspath(board_file)
+        paths = [bp] + [_effective_sibling(bp, ext, project_from)
+                        for ext in _FILL_SIBLINGS]
+        for fp in paths:
+            h.update(b'\0file\0')
+            if fp is None:
+                h.update(b'<none>')
+                continue
+            with open(fp, 'rb') as f:
+                for chunk in iter(lambda: f.read(1 << 20), b''):
+                    h.update(chunk)
+        h.update(_REFILL_SCRIPT.encode('utf-8'))
+        with open(os.path.abspath(__file__), 'rb') as f:
+            h.update(f.read())
+        h.update(os.path.realpath(kpy).encode('utf-8'))
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def _disk_cache_get(key):
+    d = _disk_cache_dir()
+    if d is None or key is None:
+        return None
+    fp = os.path.join(d, key + '.pkl')
+    try:
+        import pickle
+        with open(fp, 'rb') as f:
+            out = pickle.load(f)
+        os.utime(fp, None)      # LRU by mtime
+        return out
+    except Exception:           # noqa: BLE001 -- missing/corrupt entry is a miss
+        return None
+
+
+def _disk_cache_put(key, out) -> None:
+    d = _disk_cache_dir()
+    if d is None or key is None:
+        return
+    try:
+        import pickle
+        os.makedirs(d, exist_ok=True)
+        tmp = os.path.join(d, f'.{key}.{os.getpid()}.tmp')
+        with open(tmp, 'wb') as f:
+            pickle.dump(out, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, os.path.join(d, key + '.pkl'))
+        ents = sorted((e for e in os.scandir(d) if e.name.endswith('.pkl')),
+                      key=lambda e: e.stat().st_mtime, reverse=True)
+        for e in ents[_DISK_CACHE_KEEP:]:
+            os.unlink(e.path)
+    except Exception:           # noqa: BLE001 -- a cache that cannot write is just a miss
+        pass
+
+
 #: Why an exact fill produced no islands. A CLOSED vocabulary (#713 item 4):
 #: before this, FIVE distinct causes all returned a bare `None`, so no caller
 #: could tell "this machine has no pcbnew" from "this board is too slow for a
@@ -600,8 +678,23 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
         import copy as _copy
         return (_copy.deepcopy(_REFILL_MEMO[_mk]),
                 _ok_status(_REFILL_MEMO[_mk], memo=True))
-    tmpdir = tempfile.mkdtemp(prefix='exact_fill_')
     _t0 = time.monotonic()
+    _dk = _disk_cache_key(board_file, project_from, kpy)
+    _hit = _disk_cache_get(_dk)
+    if _hit is not None:
+        print(f"  exact fill: reused cached KiCad refill of "
+              f"{os.path.basename(board_file)} ({time.monotonic() - _t0:.1f}s; "
+              f"KICAD_EXACT_FILL_DISK_CACHE=0 disables)", flush=True)
+        if _mk is not None:
+            if len(_REFILL_MEMO) >= _REFILL_MEMO_CAP:
+                _REFILL_MEMO.pop(next(iter(_REFILL_MEMO)))
+            import copy as _copy
+            _REFILL_MEMO[_mk] = _copy.deepcopy(_hit)
+        return _hit, _ok_status(_hit, time.monotonic() - _t0, memo=True)
+    print(f"  exact fill: refilling zones of {os.path.basename(board_file)} "
+          f"in KiCad (pcbnew subprocess; tens of seconds on a large board)...",
+          flush=True)
+    tmpdir = tempfile.mkdtemp(prefix='exact_fill_')
     try:
         stem = os.path.splitext(os.path.basename(board_file))[0]
         staged = os.path.join(tmpdir, stem + '.kicad_pcb')
@@ -660,6 +753,9 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
             _REFILL_MEMO.pop(next(iter(_REFILL_MEMO)))
         import copy as _copy
         _REFILL_MEMO[_mk] = _copy.deepcopy(_out)
+    _disk_cache_put(_dk, _out)
+    print(f"  exact fill: KiCad refill took {time.monotonic() - _t0:.1f}s",
+          flush=True)
     return _out, _ok_status(_out, time.monotonic() - _t0)
 
 
