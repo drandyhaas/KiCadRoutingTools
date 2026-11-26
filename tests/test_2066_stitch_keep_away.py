@@ -110,6 +110,45 @@ def _planes(py, src, dst):
     return (r.stdout or '') + (r.stderr or '')
 
 
+def _check_pour_site_gate(d):
+    """5. The site gate sees the other side's POUR too (#2070 made a pour
+    part of the band): a via inside the pour or within GAP of its outline
+    is in band, one past GAP is not."""
+    import contextlib
+    import io
+    import uuid
+    import keep_away
+    from kicad_parser import parse_kicad_pcb
+    src = os.path.join(ROOT, 'kicad_files', 'cap_chain.kicad_pcb')
+    text = open(evidence(src, 'pour fixture'), encoding='utf-8').read()
+    end = text.rindex('\t(embedded_fonts no)')
+    ring = [(12.0, 14.0), (16.0, 14.0), (16.0, 15.0), (12.0, 15.0)]
+    pts = ' '.join(f'(xy {x} {y})' for x, y in ring)
+    zone = (f'\t(zone (net "DPB_N") (layer "F.Cu") (uuid "{uuid.uuid4()}") '
+            f'(hatch edge 0.5)\n\t\t(connect_pads yes (clearance 0.2)) '
+            f'(min_thickness 0.1)\n\t\t(fill yes (thermal_gap 0.5) '
+            f'(thermal_bridge_width 0.5))\n\t\t(polygon (pts {pts})))\n')
+    board = os.path.join(d, 'pour_gate.kicad_pcb')
+    with open(board, 'w', encoding='utf-8') as f:
+        f.write(text[:end] + zone + text[end:])
+    with contextlib.redirect_stdout(io.StringIO()):
+        pcb = parse_kicad_pcb(evidence(board, 'pour board'))
+        gate = keep_away.ViaBandGate(pcb, ['DPB_N:DPA_P:1.0'],
+                                     pcb.board_info.copper_layers, 0.0)
+    ids = {n.name: i for i, n in pcb.nets.items()}
+    in_band = gate.for_net(ids['DPA_P'])
+    assert in_band is not None, "no gate for the rule's victim net"
+    rows = [((14.0, 14.5), True, 'inside the pour'),
+            ((14.0, 15.8), True, '0.8 mm past its edge (0.5 mm via edge gap)'),
+            ((14.0, 16.4), False, '1.4 mm past its edge (1.1 mm via edge gap)')]
+    for (x, y), want, what in rows:
+        got = in_band(x, y, 0.3)
+        assert got is want, (f"a DPA_P via {what} reads in_band={got}, "
+                             f"want {want}: the site gate misreads the DPB_N "
+                             f"pour's 1.0 mm band")
+    print("PASS 5: the site gate keeps a via out of the other side's pour band")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--workdir', help='scratch directory (default: a new temp dir)')
@@ -187,6 +226,8 @@ def main():
                 '--nets', AGG, AGG, '--plane-layers', 'F.Cu', 'B.Cu',
                 '--stitch-vias'], refuse='expected AGGRESSOR:VICTIM:GAP', code=2)
     print("PASS 4: a malformed brief rule is refused before the stitch pass")
+
+    _check_pour_site_gate(d)
 
     if not args.workdir:
         shutil.rmtree(d, ignore_errors=True)
