@@ -524,6 +524,14 @@ two copies. Both read it through `keep_away.brief_rule_rows`:
   `route.py` and `route_diff.py` refuse a malformed `keep_away` there before
   routing (exit 2, the parser's message); it is never skipped.
   The brief travels with every routed output, so later steps keep it.
+- The planes step's stitch pass (`route_planes.py --stitch-vias` /
+  `--stitch-edge-fence`, and the GUI's Planes tab) reads the same key the
+  same way, in `create_plane` (#2066). It has no cost search to price a band
+  in, so there the band is a site gate: a stitch or fence via whose disk
+  would come closer than GAP to the other side's copper, outside the free
+  radius round its own net's pads, is passed over for the next candidate of
+  its nudge ring, and the stitch summary counts the sites the band gave up.
+  The pour itself is KiCad's fill, which reads `.kicad_dru`, not the brief.
 
 On the `--intent` path a rule the brief declares and the intent lacks drifts.
 So does a rule the intent carries from the brief that the brief no longer

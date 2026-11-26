@@ -36,6 +36,8 @@ engines read that sibling the way they read ``.kicad_dru`` and add its rules
 to the caller's (``resolve_keep_away``), so the CLI and the GUI both honour
 it with no flag; check_floorplan grades the same rules on the PLACED board,
 pad edge to pad edge, before any track exists (``floorplan.rule_keep_away``).
+The planes step's via stitching reads them too (#2066) and, having no cost
+search, holds them as a site gate (``ViaBandGate``).
 """
 
 from __future__ import annotations
@@ -964,6 +966,72 @@ def band_meter(pcb_data, config, net_id: int):
         return math.hypot(x2 - x1, y2 - y1) * float(hit.sum()) / len(keep)
 
     return in_band
+
+
+class ViaBandGate:
+    """The keep-away bands as a SITE gate for vias a pass places without a
+    cost search (route_planes' stitch lattice and edge fence, #2066).
+
+    The route steps price a band softly per grid cell; a stitch pass has no
+    search to price it in, and a lattice is dense enough that dropping a site
+    costs little, so here the band is a gate: ``for_net(net_id)`` answers
+    ``in_band(x, y, radius)`` -- True when a via disk of ``radius`` at (x, y)
+    comes closer than a rule's GAP (edge to edge) to copper of a net the rules
+    set ``net_id`` against (tracks, vias, pads) on any of ``layers`` (the
+    via's span), outside ``free`` mm of ``net_id``'s own pads, the same free
+    radius the route steps leave unpriced. Measured as keep_away_report
+    measures routed copper. The other side's copper is read when
+    ``for_net`` is called, so build the net's predicate after the vias an
+    earlier net placed are on ``pcb_data``."""
+
+    def __init__(self, pcb_data, rules, layers, free: float):
+        from types import SimpleNamespace
+        self._pcb = pcb_data
+        self._st = _KeepAwayState(pcb_data, parse_keep_away_rules(rules))
+        self._cfg = SimpleNamespace(layers=list(layers))
+        self._free = max(0.0, float(free or 0.0))
+        self._st.announce()
+
+    def for_net(self, net_id: int):
+        """``in_band(x, y, radius) -> bool`` for vias of ``net_id``, or None
+        when no rule sets it against another net on this board."""
+        st = self._st
+        if net_id not in st.members:
+            return None
+        opp = st.opposite((net_id,))
+        if not opp:
+            return None
+        st.refresh(self._pcb)
+        geo = {n: _net_geometry(st, self._pcb, self._cfg, n)
+               for n in (net_id, *opp)}
+        (o_segs, o_vias, o_pads), reach = _opposite_copper(geo, opp)
+        own_pads = geo[net_id]['pads']
+        free = self._free
+
+        def in_band(x: float, y: float, radius: float) -> bool:
+            px, py = np.array([x]), np.array([y])
+            if free > 0 and len(own_pads) \
+                    and (_pad_sdf(px, py, own_pads) <= free).any():
+                return False
+            r = reach + radius
+            sel = o_segs[(np.maximum(o_segs[:, 1], o_segs[:, 3]) >= x - r)
+                         & (np.minimum(o_segs[:, 1], o_segs[:, 3]) <= x + r)
+                         & (np.maximum(o_segs[:, 2], o_segs[:, 4]) >= y - r)
+                         & (np.minimum(o_segs[:, 2], o_segs[:, 4]) <= y + r)]
+            if len(sel) and ((_seg_dist(px, py, sel)[0] - sel[:, 5] - radius)
+                             < sel[:, 6] - 1e-9).any():
+                return True
+            for arr, dist in ((o_vias, lambda a: np.hypot(
+                                   x - a[:, 1], y - a[:, 2]) - a[:, 3]),
+                              (o_pads, lambda a: _pad_sdf(px, py, a)[0])):
+                sel = arr[(np.abs(arr[:, 1] - x) <= r)
+                          & (np.abs(arr[:, 2] - y) <= r)]
+                if len(sel) and ((dist(sel) - radius)
+                                 < sel[:, -2] - 1e-9).any():
+                    return True
+            return False
+
+        return in_band
 
 
 def keep_away_report(pcb_data, config, announce: bool = True) -> Optional[dict]:
