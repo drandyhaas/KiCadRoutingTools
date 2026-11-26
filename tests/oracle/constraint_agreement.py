@@ -360,6 +360,40 @@ def _rows():
         cl_pad, pad_geom(0.1),
         'pad override 0.1 wins over an unconditioned 0.4 rule (early return)')
 
+    # -- part-scoped rows (#2071): a net kept away from ONE part, by
+    # `B.Reference == 'X'` or KiCad's own `B.memberOfFootprint('X')`, read by
+    # the resolver on that part's pads (the routing keep-out and check_drc's
+    # pair grade both resolve through it) --------------------------------------
+    def cl_part(dr):
+        return dr.resolve('clearance', dr.item_for_net(2, 'track', 'F.Cu'),
+                          RuleItem(type='pad', net_id=1, net_name='A',
+                                   layers=frozenset({'F.Cu'}),
+                                   netclasses=frozenset(dr.class_constituents(1)),
+                                   effective_class=dr.effective_class(1),
+                                   footprint_ref='U1', pad_type='smd', pad_number='1'),
+                          'F.Cu').min
+
+    def _part(cond):
+        return dict(rules={'min_clearance': 0.05},
+                    dru=f'(rule "part" (constraint clearance (min 0.5mm)) (condition "{cond}"))')
+
+    for _nm, _cond, _note in (
+            ('part_reference_rule', "A.NetName == 'B' && B.Reference == 'U1'",
+             "net B kept 0.5 from U1's pad by B.Reference"),
+            ('part_reference_rule_swapped', "A.Reference == 'U1' && B.NetName == 'B'",
+             'the same with the sides swapped (KiCad tries both orders)'),
+            ('part_member_rule', "A.NetName == 'B' && B.memberOfFootprint('U1')",
+             "net B kept 0.5 from U1's pad by memberOfFootprint()"),
+            ('part_reference_other_part', "A.NetName == 'B' && B.Reference == 'U2'",
+             'a rule naming a part that is not there binds nothing: class 0.2'),
+            ('part_reference_case', "A.NetName == 'B' && B.Reference == 'u1'",
+             'the reference compared case-insensitively, as a net name is'),
+            ('part_reference_wildcard', "A.NetName == 'B' && B.Reference == 'U*'",
+             "a '*' literal on the right is a wildcard, as for a net name"),
+            ('part_reference_not_equal', "A.NetName == 'B' && B.Reference != 'U2'",
+             "!= binds a pad of another part, never the track (undefined there)")):
+        add(_nm, 'clearance', _part(_cond), cl_part, pad_geom(None), _note)
+
     # -- size rows ---------------------------------------------------------
     def tw(dr):
         return dr.resolve('track_width', dr.item_for_net(1, 'track', 'F.Cu'), None, 'F.Cu').min

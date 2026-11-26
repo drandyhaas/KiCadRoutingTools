@@ -569,13 +569,17 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
         rule.unconsumed_kinds = sorted(k for k in rule.constraints
                                        if k not in CONSUMED_KINDS)
         if 'clearance' in rule.constraints and rule.unsupported is None:
-            # evaluable, and check_drc reads it for the violations it may make
-            # legal, but no obstacle stamp prices one pad or one part
+            # evaluable, but no obstacle stamp prices one pad or one part: a
+            # rule naming a part is read as keep-outs round its pads by the
+            # route steps (#2071, net_keepouts.derive_part_clearance_keepouts,
+            # which clears this), one naming only a pad number is not
             term = _reads_one_part(rule.condition)
             if term:
-                rule.router_unhonoured = (f"clearance scoped by {term}: routing "
-                                          f"prices a net and a pad type, never one "
-                                          f"pad or one part")
+                rule.router_unhonoured = (f"clearance scoped by {term}: routing keeps "
+                                          f"a net off one part's pads (a B.Reference "
+                                          f"== 'X' or B.memberOfFootprint('X') term "
+                                          f"ANDed in), never off one pad number "
+                                          f"across parts")
         if 'disallow' in rule.constraints and rule.unsupported is None:
             # #1527: evaluable, so nothing of it is "consumed" until a step
             # honours it -- it used to pass silently as consumed
@@ -615,7 +619,9 @@ def _via_attr(v, key):
 #   term   := ITEM '.' NAME '(' args ')' | ITEM '.' NAME | STRING | NUMBER | 'L'
 # Supported properties: NetClass, NetName, Net, Type, Layer, Pad_Type, Via_Type,
 #   Pad_Number (#1660: a string compared as a NetName is, so '1' is not '01' and
-#   a plain number is not a pad number -- `kicad_condition_refusal`)
+#   a plain number is not a pad number -- `kicad_condition_refusal`),
+#   Reference (#2071: a pad's part, compared as a NetName is, undefined on a
+#   track or via -- what memberOfFootprint() reads, spelled as a property)
 # Supported functions: hasNetclass, hasExactNetclass, existsOnLayer (a wildcard is
 #   a layer pattern), isMicroVia,
 #   isBlindBuriedVia, isPlated, memberOfFootprint, memberOfGroup,
@@ -644,7 +650,7 @@ _TOKEN = re.compile(r"""
     )""", re.VERBOSE)
 
 _SUPPORTED_PROPS = {'netclass', 'netname', 'net', 'type', 'layer', 'pad_type',
-                    'via_type', 'pad_number'}
+                    'via_type', 'pad_number', 'reference'}
 _SUPPORTED_FUNCS = {'hasnetclass', 'hasexactnetclass', 'onlayer', 'existsonlayer',
                     'ismicrovia', 'isblindburiedvia', 'isplated',
                     'memberoffootprint', 'memberofgroup', 'indiffpair'}
@@ -699,12 +705,94 @@ def _reads_one_part(node) -> Optional[str]:
     if not isinstance(node, tuple) or not node:
         return None
     if node[0] == 'prop':
-        return f'{node[1]}.Pad_Number' if node[2] == 'pad_number' else None
+        return ({'pad_number': f'{node[1]}.Pad_Number',
+                 'reference': f'{node[1]}.Reference'}.get(node[2]))
     if node[0] == 'call':
         return f'{node[1]}.memberOfFootprint()' if node[2] == 'memberoffootprint' else None
     if node[0] in ('cmp', 'and', 'or', 'not'):
         return next(filter(None, map(_reads_one_part, node[1:])), None)
     return None
+
+
+def _part_term(node) -> Optional[str]:
+    """The part pattern a condition term names, when the term holds only on
+    an item of that part: `X.memberOfFootprint('P')` or `X.Reference == 'P'`
+    (either way round). None for anything else (`!=` binds every OTHER part)."""
+    if not isinstance(node, tuple) or not node:
+        return None
+    if node[0] == 'call' and node[2] == 'memberoffootprint' and len(node[3]) == 1:
+        return node[3][0]
+    if node[0] == 'cmp' and node[1] == '==':
+        for p, q in ((node[2], node[3]), (node[3], node[2])):
+            if p[0] == 'prop' and p[2] == 'reference' and q[0] == 'lit':
+                return q[1]
+    return None
+
+
+def _part_patterns(node, out: set) -> set:
+    """Every part pattern the confining part terms of an AST name."""
+    if isinstance(node, tuple) and node:
+        pat = _part_term(node)
+        if pat is not None:
+            out.add(pat)
+        else:
+            for x in node[1:]:
+                _part_patterns(x, out)
+    return out
+
+
+def _part_confines(node) -> bool:
+    """The condition is false wherever every part term (`_part_term`) is
+    false: the rule binds only the items of the parts it names. A term under
+    a `!`, or beside an `||` another term can satisfy, does not confine it
+    (`_courtyard_confines`, for the part terms)."""
+    def false_without(n):
+        if not isinstance(n, tuple) or not n:
+            return False
+        if _part_term(n) is not None:
+            return True
+        if n[0] == 'and':
+            return any(false_without(c) for c in n[1:])
+        if n[0] == 'or':
+            return all(false_without(c) for c in n[1:])
+        if n[0] == 'not':
+            return true_without(n[1])
+        return False
+
+    def true_without(n):
+        if not isinstance(n, tuple) or not n:
+            return False
+        if n[0] == 'and':
+            return all(true_without(c) for c in n[1:])
+        if n[0] == 'or':
+            return any(true_without(c) for c in n[1:])
+        if n[0] == 'not':
+            return false_without(n[1])
+        return False
+    return false_without(node)
+
+
+def _reads_part(node) -> bool:
+    """Does a parsed condition read which part an item belongs to:
+    `X.Reference` or `X.memberOfFootprint()` anywhere in it?"""
+    if not isinstance(node, tuple) or not node:
+        return False
+    if node[0] == 'prop':
+        return node[2] == 'reference'
+    if node[0] == 'call':
+        return node[2] == 'memberoffootprint'
+    return any(_reads_part(c) for c in node[1:])
+
+
+def part_scoped_clearance_rule(rule) -> bool:
+    """#2071: a clearance rule the resolver reads whose condition names a part
+    (`B.Reference == 'C12'`, `B.memberOfFootprint('C12')`). No clearance
+    channel prices one part, so check_drc resolves each pair it may bind
+    pair-exact, and the route steps keep the nets it binds off the part's
+    pads (`net_keepouts.derive_part_clearance_keepouts`)."""
+    return (rule.unsupported is None and rule.condition is not None
+            and (rule.constraints.get('clearance') or {}).get('min') is not None
+            and _reads_part(rule.condition))
 
 
 #: Every function KiCad's condition compiler knows, with the arguments it will
@@ -1489,9 +1577,9 @@ def _cmp_strings(lhs_node, lv: str, rv: str, rhs_node=None) -> bool:
         # on the RIGHT is a wildcard ('A*' == A.Pad_Number does not bind A1).
         return netname_matches(lv, rv, wildcard=rhs_node is not None
                                and rhs_node[0] == 'lit')
-    if prop in ('type', 'pad_type', 'via_type', 'netname') or (
+    if prop in ('type', 'pad_type', 'via_type', 'netname', 'reference') or (
             rhs_node is not None and rhs_node[0] == 'prop'
-            and rhs_node[2] in ('type', 'pad_type', 'via_type')):
+            and rhs_node[2] in ('type', 'pad_type', 'via_type', 'reference')):
         # KiCad's string compare, as for a net name: case-insensitive, and a
         # literal on the right a wildcard ('T*' binds a through-hole pad)
         return netname_matches(lv, rv, wildcard=rhs_node is not None
@@ -1574,6 +1662,12 @@ def _value(node, a, b, layer, ctx=None):
         if name == 'pad_number':
             return (it.pad_number if it.type == 'pad' and it.pad_number is not None
                     else _UNDEFINED)
+        if name == 'reference':
+            # #2071: a pad reads its part's reference, measured on kicad-cli
+            # 10.0.6 (tests/oracle/constraint_agreement.py, part_* rows): a
+            # track or via has none, so `B.Reference != 'U2'` binds no track
+            return (it.footprint_ref if it.type in ('pad', 'footprint')
+                    and it.footprint_ref is not None else _UNDEFINED)
     if op == 'call':
         return _call(node, a, b, layer, ctx)
     raise Unsupported(f"value of {op}")
@@ -3992,6 +4086,14 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
         except Exception as e:                                 # noqa: BLE001
             rules.net_keepouts = []
             rules.notes.append(f"net-filtered keep-outs not derived ({e})")
+        try:
+            # #2071: a clearance rule bound to one part, as keep-outs round
+            # that part's pads
+            from net_keepouts import derive_part_clearance_keepouts
+            rules.net_keepouts = list(rules.net_keepouts) + derive_part_clearance_keepouts(
+                rules, pcb_data)
+        except Exception as e:                                 # noqa: BLE001
+            rules.notes.append(f"part-scoped clearance keep-outs not derived ({e})")
     try:
         config.rules = rules
     except Exception:                                          # noqa: BLE001
