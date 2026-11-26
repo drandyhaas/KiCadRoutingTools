@@ -13,9 +13,21 @@ solve_apart(): one solve in a PROCESS OF ITS OWN, its answer read back -- for a 
 first solution, where glibc reports the heap corrupted ("corrupted size vs. prev_size") from the destructor of the
 solver's disjunctive precedences as the search is taken down; and a four-worker search with the objective set aside,
 a segmentation fault in a worker's clause propagation. In the caller's process that ends the whole bus step, every
-stage of it; in its own, the solve has no answer and the caller goes on as it does with no plan."""
+stage of it; in its own, the solve has no answer and the caller goes on as it does with no plan.
+
+A HINTED MODEL A WORKER FINDS INFEASIBLE AS IT LOADS IT, in a deterministic search of several workers (interleave_search,
+num_workers > 1): CP-SAT 9.15 aborts the process ("Check failed: heuristics.fixed_search != nullptr", from
+QuickSolveWithHint). The worker's load stops at the proof before it builds its search strategies, and its hint search
+runs next all the same: that search's only guard is the problem's SYNCHRONIZED status, which a deterministic search
+brings up to date between batches, not within one. A repair's model, most of its lanes held, is one such model; the
+abort ended two bus steps with nothing routed. The solver's own log says it first -- the worker's "#Done ... [loading]"
+line, written as it proves it -- so the solver() gives watches for that line in such a solve and stops the search
+there: the hint search sees the stop and returns, and the solve answers INFEASIBLE, the answer the proof gave. Only a
+proof made while loading writes that line; no other solve is touched, and its answer is the same, its log read
+(log_search_progress on, to no output of its own) for that solve alone."""
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,11 +36,46 @@ import awx_settings
 
 DEFAULT = 1             # CP-SAT's own random_seed when none is given: round r runs under DEFAULT + r - 1
 
+_LOADING = re.compile(r'#Done\b.*\[loading\]')      # a worker's proof made as it loaded the model (its log line)
+_CLASS = None
+
+
+def _solver_class():
+    """CpSolver, its solve() stopped at a proof made while loading the model in a deterministic hinted search of
+    several workers (the module's note); built once, as CP-SAT is imported only when a solver is asked for"""
+    global _CLASS
+    if _CLASS is None:
+        from ortools.sat.python import cp_model
+
+        class Solver(cp_model.CpSolver):
+            def solve(self, model, solution_callback=None):
+                p = self.parameters
+                if not (p.interleave_search and p.num_workers > 1 and len(model.proto.solution_hint.vars)):
+                    return super().solve(model, solution_callback)
+                was_log, was_out, was_cb = p.log_search_progress, p.log_to_stdout, self.log_callback
+
+                def watch(line):
+                    if was_cb is not None:
+                        was_cb(line)
+                    if _LOADING.match(line):
+                        self.stop_search()
+                if not was_log:
+                    p.log_search_progress, p.log_to_stdout = True, False
+                self.log_callback = watch
+                try:
+                    return super().solve(model, solution_callback)
+                finally:
+                    self.log_callback = was_cb
+                    if not was_log:
+                        p.log_search_progress, p.log_to_stdout = was_log, was_out
+        _CLASS = Solver
+    return _CLASS
+
 
 def solver():
-    """a CpSolver, its random_seed BUS_SEED's when the step gives one"""
-    from ortools.sat.python import cp_model
-    s = cp_model.CpSolver()
+    """a CpSolver, its random_seed BUS_SEED's when the step gives one (stopped at a proof made while loading the model
+    where a deterministic hinted search would abort there: the module's note)"""
+    s = _solver_class()()
     v = awx_settings.get('BUS_SEED')
     if v not in (None, ''):
         s.parameters.random_seed = int(v)
@@ -80,7 +127,7 @@ def solve_apart(model, s):
 def _apart(mf, pf, of):
     """(solve_apart's process) the model and the parameters read, solved, the answer written"""
     from ortools.sat.python import cp_model
-    m, s = cp_model.CpModel(), cp_model.CpSolver()
+    m, s = cp_model.CpModel(), _solver_class()()
     with open(mf, encoding='utf-8') as f:
         if not m.Proto().parse_text_format(f.read()):
             sys.exit(f'solve_apart: {mf} is no model')
