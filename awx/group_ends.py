@@ -6341,7 +6341,8 @@ def main():
     for it in M_['items'][:40]:
         log('    ' + ', '.join(f'{k_} {it[k_]}' for k_ in ('type', 'layer', 'net1', 'net2', 'pad_ref')
                                if it.get(k_) is not None)[:260])
-    # ---- THE FIELD'S TIES: the power pads beneath the group's parts tied before a lane is planned (field_ties)
+    # ---- THE FIELD'S TIES: the power pads beneath and beside the group's parts tied before a lane is planned
+    # (field_ties)
     if not field_bad and not no_plan:
         import field_ties
         fpath_ = os.path.join(out, 'shared_field.kicad_pcb')
@@ -6356,7 +6357,7 @@ def main():
                                 + join_runs(wayouts + row_ways, bpcb.board_info.copper_layers, EXIT_REACH))
             d_t = field_drc(fpath_, 'tied')[0] if T_ and (T_['segments'] or T_['vias']) else M_['d_f']
         if T_ is None:
-            log('  field ties: no pad on a poured net beneath the group\'s parts')
+            log('  field ties: no pad on a poured net beneath or beside the group\'s parts')
         elif d_t is None or M_['d_f'] is None or d_t > M_['d_f']:
             # (ties that break a rule are no ties: the field goes on as it was measured, and the run says so)
             shutil.copy(fpath_ + '.untied', fpath_)
@@ -6399,7 +6400,7 @@ def main():
                 log('  field ties: walling a pad in -- ' + '; '.join(f'{k_}: {w_}' for k_, w_ in named_)
                     + (f' ({len(out_s)} track(s) and {len(out_v)} via(s) not kept)' if out_s or out_v else ''))
             json.dump({'tracks': T_['tracks'], 'vias': T_['vs']}, open(os.path.join(out, 'field_ties.json'), 'w'))
-            log(f'  field ties: {len(T_["tied"])} of the {len(T_["pads"])} pad(s) on a poured net beneath '
+            log(f'  field ties: {len(T_["tied"])} of the {len(T_["pads"])} pad(s) on a poured net beneath or beside '
                 f'{", ".join(sorted(parts_))} tied before the lanes -- {T_["segments"]} tracks, {T_["vias"]} vias, '
                 f'{T_["secs"]:.0f} s; DRC {d_t}'
                 + (f'; {T_["strayed"]} tie(s) that left their part\'s fan or the outer layers not kept'

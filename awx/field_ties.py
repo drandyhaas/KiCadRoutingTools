@@ -1,4 +1,5 @@
-"""THE FIELD'S TIES -- the power pads beneath a group's parts joined to their nets while the field is still open.
+"""THE FIELD'S TIES -- the power pads beneath a group's parts, and beside them, joined to their nets while the field is
+still open.
 
 The chain makes a plane's ties last (#562): the pour step lays bare zones, and the route step after the buses drops a
 via at each pad. Beneath a bus's parts that is too late -- the lanes have taken the layers under the pad, and no later
@@ -52,6 +53,32 @@ def beneath(pcb, parts, nets):
         for p in f.pads:
             if p.net_id in nets and not p.drill and p.pad_type != 'np_thru_hole' and \
                     any(x0 <= p.global_x <= x1 and y0 <= p.global_y <= y1 for x0, y0, x1, y1 in boxes):
+                got.append(p)
+    return got
+
+
+TIE_BESIDE = 2.0      # (mm) a supply pad this far outside a group part's pad box is tied before the lanes too
+TIE_NEAR = 1.0        # (mm) ...by copper that stays this near the pad
+
+
+def beside(pcb, parts, nets, reach):
+    """the pads BESIDE the parts: as beneath's, but those outside every part's pad box and within `reach` of one"""
+    boxes = []
+    for r in parts:
+        f = pcb.footprints.get(r)
+        if f is None or not f.pads:
+            continue
+        xs, ys = [p.global_x for p in f.pads], [p.global_y for p in f.pads]
+        boxes.append((min(xs), min(ys), max(xs), max(ys)))
+    gap = lambda b, p: math.hypot(max(b[0] - p.global_x, 0, p.global_x - b[2]),     # noqa: E731
+                                  max(b[1] - p.global_y, 0, p.global_y - b[3]))
+    got = []
+    for ref, f in pcb.footprints.items():
+        if ref in parts:
+            continue
+        for p in f.pads:
+            if p.net_id in nets and not p.drill and p.pad_type != 'np_thru_hole' and boxes and \
+                    0 < min(gap(b, p) for b in boxes) <= reach:
                 got.append(p)
     return got
 
@@ -561,14 +588,24 @@ def lay(field, parts, wayouts=(), log=None, ways=()):
     a = _load(field)
     poured = {z.net_id for z in (a.zones or []) if z.net_id}
     pads = beneath(a, set(parts), poured)
-    if not pads:
+    # ...AND THE PADS BESIDE THE PARTS (beside, TIE_BESIDE): a decoupling capacitor a millimetre outside an array's
+    # last row stands where the lanes leave it. Left to the route step, two such ground pads had a lane over them on
+    # every layer a via needs, and their net shipped open; tied here, each by copper that stays near its own pad
+    # (TIE_NEAR), the lanes are planned round the one via.
+    near = beside(a, set(parts), poured, TIE_BESIDE)
+    if not pads and not near:
         return None
     # (...and a tie stays in its part's FAN: led out past the exits and round them, one ran 2.7 mm outside an array
     # on an inner layer, half way round it, across where the lanes of two faces leave)
     # (...and on the OUTER layers: a tie is a stub on its pad's face and a via. A rail with no pour beneath the part
     # was run pad to pad on an inner layer along an array's edge, and the lanes leaving that face could not be laid)
-    got = _pass(field, {a.nets[p.net_id].name for p in pads}, pads, list(wayouts) + list(ways),
-                within=fans(a, set(parts), wayouts), outer=True)
+    # (...and the pass reads the field WITHOUT its outer layers' pours, as lay_after does: the field's back pour reaches
+    # a pad beneath an array from every side, the pass read the pad joined and laid nothing, and the lanes then cut
+    # the pour from it -- with no way left to it once they stood)
+    box = fans(a, set(parts), wayouts) + [(p.global_x - TIE_NEAR, p.global_y - TIE_NEAR, p.global_x + TIE_NEAR,
+                                          p.global_y + TIE_NEAR) for p in near]
+    got = _pass(field, {a.nets[p.net_id].name for p in pads + near}, pads + near, list(wayouts) + list(ways),
+                within=box, outer=True, bare_outer=True)
     if not got['tied'] and got['exit'] and log:
         log(f'  field ties: the pass ended with exit {got["exit"]} -- ({field[:-len(".kicad_pcb")]}.ties.log)')
-    return dict(got, pads=pads, secs=time.time() - t0)
+    return dict(got, pads=pads + near, secs=time.time() - t0)
