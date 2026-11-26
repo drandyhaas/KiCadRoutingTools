@@ -199,6 +199,17 @@ site is accepted only when:
    zones, and a site off the net's main filled cluster is rejected rather than
    anchoring an isolated island. Without KiCad's python (or a source file) the
    run says so and keeps the model gate alone.
+4. The via stays out of every keep-away band the board's
+   [design brief](design-brief.md#keep_away-two-net-groups-apart) declares
+   for its net (#2066): no closer than the rule's GAP, edge to edge, to copper
+   of a net on the rule's other side (tracks, vias, pads, on any layer the
+   via spans), except within the free radius (1.5 mm) of the net's own pads,
+   which the route steps leave unpriced too. The rules are read from the
+   brief beside the board, as route.py reads them, so there is no flag or GUI
+   control; the run prints `Keep-away: N rule(s) read from the design brief`
+   and the stitch summary counts the sites the band gave up (`in a keep-away
+   band: K`, and how many more it moved). A board without a brief places
+   exactly the vias it did before.
 
 A site already within `pitch/2` of a same-net via or plated through-hole
 barrel is coverage-satisfied and skipped; a blocked site is nudged outward up

@@ -2750,6 +2750,7 @@ def _stitch_plane_area_vias(
     tap_vias: Optional[List[Dict]] = None,
     tap_segments: Optional[List[Dict]] = None,
     exclude_net_ids: Optional[List[int]] = None,
+    keep_away_gate=None,
 ) -> List[Dict]:
     """Area via stitching + board-edge via fence (#485): bond each
     multi-layer plane net's pours across layers with a periodic via lattice
@@ -2778,6 +2779,11 @@ def _stitch_plane_area_vias(
     A site already within pitch/2 of a same-net via or plated barrel is
     coverage-satisfied and skipped (the via-reuse rule); a blocked site is
     nudged outward ring-by-ring up to pitch/4 before being given up.
+
+    ``keep_away_gate`` (a keep_away.ViaBandGate, #2066) holds the design
+    brief's keep-away bands: a candidate whose via would sit inside one is
+    passed over like a blocked one, and a site with no candidate left
+    outside the band is counted ``in a keep-away band``.
 
     Placed vias are appended to pcb_data.vias HERE (later passes must see
     them); the returned dicts are for all_new_vias only -- the caller must
@@ -3022,12 +3028,16 @@ def _stitch_plane_area_vias(
             same_net_pad_clearance=same_net_pad_clearance)
         # Vias stitched for earlier nets in this pass are already in
         # pcb_data.vias (appended below), so the map above blocks them.
+        # The keep-away band reads them the same way (#2066).
+        in_band = keep_away_gate.for_net(net_id) if keep_away_gate else None
+        band_moved = [0]
 
         def _try_site(cx, cy, pitch_local, max_nudge):
             """Gate + place one site. Returns (outcome, d0) where outcome is
-            'no_fill' | 'off_exact' | 'covered' | 'blocked' | 'placed' and d0
-            the pre-place distance to the nearest same-net bond (None for
-            no_fill/off_exact)."""
+            'no_fill' | 'off_exact' | 'covered' | 'blocked' | 'keep_away' |
+            'placed' and d0 the pre-place distance to the nearest same-net
+            bond (None for no_fill/off_exact). 'keep_away': every clear
+            candidate lay inside a keep-away band (#2066)."""
             if _fill_layers_ok(cx, cy) < 2:
                 return 'no_fill', None
             if _exact_layers_ok(cx, cy) < 2:
@@ -3035,6 +3045,7 @@ def _stitch_plane_area_vias(
             d0 = _nearest_bond(cx, cy)
             if d0 <= pitch_local / 2:
                 return 'covered', d0
+            banded = False
             for x, y in _candidates(cx, cy, max_nudge):
                 gx, gy = coord.to_grid(x, y)
                 if obstacles.is_via_blocked(gx, gy):
@@ -3043,6 +3054,11 @@ def _stitch_plane_area_vias(
                     continue
                 if _exact_layers_ok(x, y) < 2:
                     continue
+                if in_band is not None and in_band(x, y, via_size / 2):
+                    banded = True
+                    continue
+                if banded:
+                    band_moved[0] += 1
                 # FREE (#2067): its only connection is the pour, so without
                 # the flag KiCad's load gives it the net of any stored fill
                 # of another net it sits in -- as KiCad's own via tool marks
@@ -3061,7 +3077,17 @@ def _stitch_plane_area_vias(
                                    via_size, config.clearance)
                 bonds.append((x, y))
                 return 'placed', d0
-            return 'blocked', d0
+            return ('keep_away' if banded else 'blocked'), d0
+
+        def _band_clause(n_band):
+            """The summary's keep-away count; '' when no rule concerns the
+            net, so a board without one prints what it always did."""
+            if in_band is None:
+                return ''
+            moved = band_moved[0]
+            band_moved[0] = 0
+            return (f", in a keep-away band: {n_band}"
+                    + (f" ({moved} more moved out of one)" if moved else ''))
 
         # Board-edge via fence first: fence vias then count as bonds for the
         # lattice's coverage rule, so the rim isn't stitched twice.
@@ -3078,7 +3104,7 @@ def _stitch_plane_area_vias(
             print(f"\nEdge via fence '{net_name}' at {fpitch:g}mm pitch, "
                   f"{inset:.2f}mm inset ({len(ring)} outline sites)")
             f_counts = {'placed': 0, 'covered': 0, 'no_fill': 0,
-                        'off_exact': 0, 'blocked': 0}
+                        'off_exact': 0, 'blocked': 0, 'keep_away': 0}
             for cx, cy in ring:
                 outcome, _d0 = _try_site(cx, cy, fpitch, fpitch / 4)
                 f_counts[outcome] += 1
@@ -3086,13 +3112,14 @@ def _stitch_plane_area_vias(
                   f"(covered by existing via/barrel: {f_counts['covered']}, "
                   f"no 2-layer fill: {f_counts['no_fill']}, "
                   f"off exact main fill: {f_counts['off_exact']}, "
-                  f"no clear site: {f_counts['blocked']})")
+                  f"no clear site: {f_counts['blocked']}"
+                  f"{_band_clause(f_counts['keep_away'])})")
 
         if stitch_lattice:
             print(f"\nVia stitching '{net_name}' across "
                   f"{'/'.join(sorted(models_by_layer))} at {stitch_pitch:g}mm "
                   f"pitch ({len(lattice)} lattice sites)")
-            placed = covered = no_fill = off_exact = blocked = 0
+            placed = covered = no_fill = off_exact = blocked = n_band = 0
             max_dist_before = max_dist_after = 0.0
             for cx, cy in lattice:
                 outcome, d0 = _try_site(cx, cy, stitch_pitch,
@@ -3107,8 +3134,11 @@ def _stitch_plane_area_vias(
                 if outcome == 'covered':
                     covered += 1
                     max_dist_after = max(max_dist_after, d0)
-                elif outcome == 'blocked':
-                    blocked += 1
+                elif outcome in ('blocked', 'keep_away'):
+                    if outcome == 'blocked':
+                        blocked += 1
+                    else:
+                        n_band += 1
                     max_dist_after = max(max_dist_after, d0)
                 else:
                     placed += 1
@@ -3119,7 +3149,7 @@ def _stitch_plane_area_vias(
                   f"(covered by existing via/barrel: {covered}, "
                   f"no 2-layer fill: {no_fill}, "
                   f"off exact main fill: {off_exact}, "
-                  f"no clear site: {blocked})")
+                  f"no clear site: {blocked}{_band_clause(n_band)})")
             if max_dist_before > 0:
                 print(f"  Max lattice-site distance to nearest same-net bond: "
                       f"{max_dist_before:.1f}mm -> {max_dist_after:.1f}mm")
@@ -4201,6 +4231,16 @@ def create_plane(
                   + (f" (overrides pitch {stitch_pitch:g}mm)"
                      if abs(_p - stitch_pitch) > 1e-9 else ""))
             stitch_pitch = _p
+        # #2066: the design brief's keep-away rules (#1253), read here as
+        # batch_route reads them, so both fronts get them with no flag: a
+        # stitch site whose via would sit inside a band is given up and the
+        # next candidate of its nudge ring tried.
+        from keep_away import resolve_keep_away, ViaBandGate
+        _ka_rules = resolve_keep_away(None, input_file, pcb_data)
+        _ka_gate = ViaBandGate(
+            pcb_data, _ka_rules,
+            pcb_data.board_info.copper_layers or config.layers,
+            config.keep_away_free) if _ka_rules else None
         stitch_via_dicts = _stitch_plane_area_vias(
             pcb_data, net_names, plane_layers, net_ids, all_zone_data,
             config, coord, stitch_pitch, via_size, via_drill,
@@ -4219,7 +4259,8 @@ def create_plane(
             zone_sexprs=all_zone_sexprs,
             tap_vias=all_new_vias,
             tap_segments=all_new_segments,
-            exclude_net_ids=all_ripped_net_ids)
+            exclude_net_ids=all_ripped_net_ids,
+            keep_away_gate=_ka_gate)
         all_new_vias.extend(stitch_via_dicts)
         total_vias_placed += len(stitch_via_dicts)
 
@@ -4737,6 +4778,15 @@ Examples:
             f"a corresponding plane layer. Use | to separate multiple nets on "
             f"the same layer (e.g., --nets GND 'VA19|VA11' --plane-layers "
             f"In4.Cu In5.Cu)")
+    # #2066: the stitch pass reads the design brief's keep_away (as route.py
+    # does, #1253); a malformed one is a usage error before the board is
+    # parsed, not a traceback from the engine mid-run.
+    if args.stitch_vias or args.stitch_edge_fence:
+        from keep_away import read_brief_keep_away
+        try:
+            read_brief_keep_away(args.input_file)
+        except ValueError as _kae:
+            parser.error(str(_kae))
 
     # Parse --nets arguments: detect | separator for multi-net layers
     # Build data structures:

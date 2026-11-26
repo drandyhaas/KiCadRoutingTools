@@ -235,7 +235,10 @@ Validate routed boards against the *real* spec, with the right checker — most
   the way `.kicad_dru` is (input_file, else `PCBData.source_path`), through
   `keep_away.resolve_keep_away`, and added to any `--keep-away` with no flag
   or GUI control; the run prints `Keep-away: N rule(s) read from the design
-  brief`. One declaration, two readers through one parser
+  brief`. `create_plane`'s stitch pass (`--stitch-vias` / the fence, #2066)
+  reads them the same way and gates each via site on the band
+  (`keep_away.ViaBandGate`), since it has no cost search to price one in.
+  One declaration, two readers through one parser
   (`keep_away.brief_rule_rows`): check_floorplan grades it pad edge to pad
   edge on the placement, WARN unless `severity` promotes it, and the placer
   does not read it.)

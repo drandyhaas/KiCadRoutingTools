@@ -298,6 +298,10 @@ the brief in its outermost call only; its nested sub-runs inherit the merged
 rules. A board with no brief, or a brief without the key, routes exactly as
 before. `check_floorplan` grades the same rules on the placed pads, before any
 track exists (`keep_away` in [the floorplan intent](floorplan-intent.md)).
+`create_plane`'s via stitching reads the brief's rules the same way (#2066)
+and, having no cost search, holds them as a site gate
+(`keep_away.ViaBandGate`): a stitch or fence via inside a band is passed over
+for the next candidate (see [Plane Routing](route-plane.md)).
 `keep_away.unpriced_rules(rules, board_path)` answers the reverse question
 with the same reader: which of a list of rules the engines will NOT price on
 that board. check_floorplan asks it about the intent it grades and warns
