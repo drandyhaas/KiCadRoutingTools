@@ -14,7 +14,6 @@ MAP=(
   "comexpress7|antmicro__comexpress7"
   "kria_k26|antmicro__kria_k26"
   "snapdragon845|antmicro__snapdragon845"
-  "hackrf_pro|gsg__hackrf_pro"
   "artix_dc_scm|antmicro__artix_dc_scm"
   "urti|gsg__urti_mainboard"
   "jetson_orin|antmicro__jetson_orin_baseboard"

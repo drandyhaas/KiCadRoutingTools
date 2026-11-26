@@ -361,6 +361,32 @@ def generate_gr_line_sexpr(start: Tuple[float, float], end: Tuple[float, float],
 
 DEFAULT_VIA_TENTING = {'tenting': '(front yes) (back yes)'}
 
+#: The first board file format whose booleans are `yes`/`no` (KiCad 8's "V8
+#: file format normalization"). KiCad 6/7 write a free via as a bare `(free)`
+#: and their parser refuses `(free yes)` (it expects `)` right after the
+#: token); KiCad 8 and later read both spellings.
+FREE_VIA_BOOL_MIN_VERSION = 20231014
+
+
+def via_free_sexpr(free: bool, file_version: int = None) -> str:
+    """The `(free ...)` token of a via block, or '' for a via that is not free.
+
+    A FREE via keeps the net the file gives it: KiCad's connectivity pass
+    never re-nets it from the copper it touches. A via with no track or pad of
+    its own net -- a stitching via whose only connection is its pour -- needs
+    it, because otherwise `pcbnew.LoadBoard` and kicad-cli give it the net of
+    whatever stored zone fill it sits in (#2067). KiCad's own via tool sets it
+    on exactly that via: one placed on a zone, with no track or pad under it.
+
+    `file_version` is the `(version N)` of the board the via is written into;
+    before `FREE_VIA_BOOL_MIN_VERSION` the token is the bare `(free)` that
+    format's reader takes. None writes `(free yes)`."""
+    if not free:
+        return ""
+    if file_version and file_version < FREE_VIA_BOOL_MIN_VERSION:
+        return "\n\t\t(free)"
+    return "\n\t\t(free yes)"
+
 VIA_PROTECTION_TOKEN_ORDER = ('tenting', 'covering', 'plugging', 'capping', 'filling')
 
 
@@ -587,11 +613,15 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
                        layers: List[str], net_id: int, free: bool = False,
                        net_name: str = None, tenting_attrs: dict = None,
                        inherit_when_unspecified: bool = False,
-                       via_type: str = None) -> str:
+                       via_type: str = None, file_version: int = None) -> str:
     """Generate KiCad S-expression for a via.
 
     Args:
-        free: If True, adds (free yes) to prevent KiCad from auto-assigning net based on overlapping tracks.
+        free: If True, marks the via free so KiCad keeps its net instead of
+            re-assigning it from the copper it touches (see via_free_sexpr).
+        file_version: The `(version N)` of the board this via is written
+            into. Pass it with `free`: a KiCad 6/7 file takes `(free)`, not
+            `(free yes)`.
         net_name: If provided, output KiCad 10 format (net "name") instead of (net id).
         tenting_attrs: The via's own protection spec as parsed from the board
             (Via.tenting_attrs). Pass it for any via that already existed so a
@@ -614,7 +644,7 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
     """
     layers_str = '" "'.join(layers)
     type_word = f' {via_type}' if via_type in PARTIAL_VIA_TYPES else ''
-    free_str = "\n\t\t(free yes)" if free else ""
+    free_str = via_free_sexpr(free, file_version)
     net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     # KiCad 10 adds structured tenting/covering/plugging fields after layers
     tenting_str = via_protection_sexpr(tenting_attrs, net_name,
@@ -1290,6 +1320,7 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 
     # Generate via S-expressions
     if vias:
+        _file_version = detect_kicad_version(content)   # the `(free ...)` spelling
         for via in vias:
             # #749 A: this writer had NO tenting_attrs parameter at all, and it
             # also takes remove_vias -- so a via removed and re-added round-trips
@@ -1333,6 +1364,7 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
                 inherit_when_unspecified=existing,
                 # A re-emitted blind/micro via keeps its type word.
                 via_type=via.get('via_type'),
+                file_version=_file_version,
             )
             elements.append(v)
 

@@ -380,7 +380,9 @@ python3 package_pcm.py --binary-dir ./path/to/release/artifacts
   the rows the run adds (a fanout's next rung, a re-fan) appear as they start.
   Selecting a row shows its command line, decisions, summary and log tail (a failed
   one its exit code and error). Options: *Finish only* (`--finish`), *Effort factor*
-  (`--effort-factor`), *Plane layer cost* (`--plane-layer-cost`). **Stop** kills the
+  (`--effort-factor`), *Plane layer cost* (`--plane-layer-cost`), *Board's own rules*
+  (`--board-rules`), *Start at the fab floor* (`--floor-first`), *Keep placement* (`--keep-placement`), *Write filled zones*
+  (`--write-fill`). **Stop** kills the
   run and its steps. **Apply Result to Board** makes the open board match the shipped
   result -- footprint poses (the decap step moves caps), tracks and vias (live copper
   the result does not have is removed), the zones with their fills (not refilled), and

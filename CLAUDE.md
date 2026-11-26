@@ -177,7 +177,11 @@ Validate routed boards against the *real* spec, with the right checker — most
     controls select them from the same constants. An explicit `--track-width` /
     `--via-size` / `--clearance` is drawn as asked, floored only at the PHYSICAL fab
     floor; a request below a stock Board Setup minimum marks that minimum stale for
-    the run (said so on the console) rather than being pinned up to it.
+    the run (said so on the console) rather than being pinned up to it. The one
+    exception is a `.kicad_dru` `track_width` rule (#2014): where a layer's rule
+    window excludes the explicit `--track-width`, the net draws it clamped into
+    that window on that layer (down to the rule's max; up only to a CUSTOM
+    rule's min), as KiCad's router treats a custom size against a rule.
   - The PLACEMENT CLI `place_fanout_clearance.py` keeps its `--clearance` = ceiling
     contract (#768/#769, pinned by its test family); the GUI fanout tab prices that
     ceiling from the Min Clearance override alone (`placement_clearance_ceiling`).
@@ -231,7 +235,10 @@ Validate routed boards against the *real* spec, with the right checker — most
   the way `.kicad_dru` is (input_file, else `PCBData.source_path`), through
   `keep_away.resolve_keep_away`, and added to any `--keep-away` with no flag
   or GUI control; the run prints `Keep-away: N rule(s) read from the design
-  brief`. One declaration, two readers through one parser
+  brief`. `create_plane`'s stitch pass (`--stitch-vias` / the fence, #2066)
+  reads them the same way and gates each via site on the band
+  (`keep_away.ViaBandGate`), since it has no cost search to price one in.
+  One declaration, two readers through one parser
   (`keep_away.brief_rule_rows`): check_floorplan grades it pad edge to pad
   edge on the placement, WARN unless `severity` promotes it, and the placer
   does not read it.)
@@ -350,10 +357,11 @@ Validate routed boards against the *real* spec, with the right checker — most
   (#900)** — the net classes carry the clearance the board was routed to. They
   used to share one key, so one part with a 2 mil pad override turned a
   requested `--clearance 0.15` into a 0.0508 board, which the next step then
-  read back as the board's own Default class. The pad-override cap is also
+  read back as the board's own Default class. Both caps are also
   RECORDED (`kicad_routing_tools.pad_override_min_clearance`, both fronts,
-  #1369), so `--escalation board` reads the board's own minimum rather than
-  one part's override as the board floor.
+  #1369/#2060), so `--escalation board` reads the board's own minimum rather
+  than one part's override, or a rule that binds only its own items, as the
+  board floor.
   Grade a ruled board with plain `check_drc.py` (it auto-reads); a hand-rolled
   checker that ignores the dru will manufacture phantom flags on relaxed layers
   and miss real ones on tightened layers.
@@ -369,6 +377,10 @@ Validate routed boards against the *real* spec, with the right checker — most
   net's, the shared band is each kind's lowest, a net above it gets the rest while
   it routes (`net_keepouts.derive_edge_bands`), and `config.board_edge_declared`
   is what the DRC writeback records.
+  **A clearance rule naming one part (#2071)** -- `B.Reference == 'C12'` or
+  `B.memberOfFootprint('C12')` -- becomes keep-outs round that part's pads at the
+  same chokepoint (`net_keepouts.derive_part_clearance_keepouts`, the resolver
+  deciding nets and layers) and check_drc grades it pair by pair.
   **Via rules (#1676) are read at the same place.** `DesignRules.via_floors` is
   what binds a via (condition, and the project's `rule_severities`); a step given
   no explicit via starts there (`via_from_class`), and `fab_tiers.escalation_rungs`

@@ -400,6 +400,11 @@ REFUSAL_SITES = {
         'call:fab_tier_from_args': ('file', '_fab_overrides_missing'),
         'both a positional output and --output we': ('argv', '_output_twice'),
         'number of net arguments (': ('argv', '_planes_count_mismatch'),
+        # #2066: the stitch pass reads the brief's keep_away, as route.py does.
+        'call:read_brief_keep_away': (
+            'board', "reads the design brief beside the input board"),
+        'except ValueError from read_brief_keep_away': (
+            'board', "the design brief's keep_away"),
         'call:load_net_clearances': ('file', '_net_clearances_unreadable'),
         'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },

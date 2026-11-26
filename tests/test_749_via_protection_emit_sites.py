@@ -286,6 +286,25 @@ def run():
     check(type_calls >= 10, f"only {type_calls} generate_via_sexpr call(s) "
                             f"found -- the walk has gone stale")
 
+    # ...and the FREE flag (#2067): a call that can emit one must say which
+    # file format it writes into, because KiCad 6/7 read only a bare `(free)`
+    # and refuse the `(free yes)` KiCad 8+ writes.
+    free_calls = 0
+    for rel, tree in _repo_trees(ROOT_DIR):
+        for c in ast.walk(tree):
+            if (isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                    and c.func.id == 'generate_via_sexpr'):
+                kw = {k.arg for k in c.keywords}
+                if len(c.args) < 7 and 'free' not in kw:
+                    continue
+                free_calls += 1
+                check('file_version' in kw,
+                      f"{rel}:{c.lineno}: generate_via_sexpr passes free but no "
+                      f"file_version= -- a free via written into a KiCad 6/7 "
+                      f"file as `(free yes)` makes the board unloadable there")
+    check(free_calls >= 4, f"only {free_calls} generate_via_sexpr call(s) pass "
+                           f"free -- the walk has gone stale")
+
     # ...and every copy of an EXISTING via's layers -- a dict or a Via() built
     # from `v.layers` -- carries its type next to them, or the copy that
     # reaches a writer has lost it before the writer is called.

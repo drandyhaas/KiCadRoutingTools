@@ -25,7 +25,7 @@ from blocking_analysis import analyze_frontier_blocking
 from protected_nets import rip_refusal
 from history_congestion import record_rip   # #590
 from polarity_swap import get_canonical_net_id
-from obstacle_cache import refresh_net_obstacles as _refresh_map   # #806
+from obstacle_cache import refresh_net_obstacles as _refresh_map, committed_net_ids   # #806
 
 
 def stamp_result_copper(obstacles, result: dict, config, extra_clearance: float) -> None:
@@ -479,7 +479,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                 results.remove(saved_result)
                             remove_route_from_pcb_data(pcb_data, saved_result)
                             _refresh_map(working_obstacles, net_obstacles_cache,
-                                         pcb_data, config, rip_net_ids)   # #806
+                                         pcb_data, config,
+                                         committed_net_ids(saved_result, rip_net_ids))   # #806
                             # #590: a blocker rip, done inline here rather than
                             # through rip_up_net -- charge it the same way, or
                             # this path's conflicts are invisible to history.
@@ -530,7 +531,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                         if reroute_result and not reroute_result.get('failed') and not reroute_result.get('probe_blocked'):
                                             add_route_to_pcb_data(pcb_data, reroute_result, debug_lines=config.debug_lines)
                                             _refresh_map(working_obstacles, net_obstacles_cache,
-                                                         pcb_data, config, ripped_ids)   # #806
+                                                         pcb_data, config,
+                                                         committed_net_ids(reroute_result, ripped_ids))   # #806
                                             # Add to results list if the ripped result was in it
                                             if ripped_was_in_results and results is not None:
                                                 results.append(reroute_result)
@@ -573,16 +575,19 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                             # (it would have its new result in routed_results, not the old one)
                                             already_rerouted = (ripped_ids[0] in routed_results and
                                                               routed_results[ripped_ids[0]] != ripped_saved)
+                                            _touched = committed_net_ids(ripped_saved, ripped_ids)
                                             if already_rerouted:
                                                 # Remove the new route that was added during partial success
                                                 new_result = routed_results[ripped_ids[0]]
                                                 remove_route_from_pcb_data(pcb_data, new_result)
+                                                _touched += [n for n in committed_net_ids(new_result, ())
+                                                             if n not in _touched]
                                                 if new_result in results:
                                                     results.remove(new_result)
                                             # Now restore the old route
                                             add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
                                             _refresh_map(working_obstacles, net_obstacles_cache,
-                                                         pcb_data, config, ripped_ids)   # #806
+                                                         pcb_data, config, _touched)   # #806
                                             if ripped_was_in_results and results is not None:
                                                 # Only append if not already in results (prevent duplicates)
                                                 if ripped_saved not in results:
@@ -604,7 +609,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                         if ripped_saved and ripped_ids[0] not in routed_net_ids:
                             add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
                             _refresh_map(working_obstacles, net_obstacles_cache,
-                                         pcb_data, config, ripped_ids)   # #806
+                                         pcb_data, config,
+                                         committed_net_ids(ripped_saved, ripped_ids))   # #806
                             if ripped_was_in_results and results is not None and ripped_saved not in results:
                                 results.append(ripped_saved)
                             for rid in ripped_ids:

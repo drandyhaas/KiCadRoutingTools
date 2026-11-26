@@ -1235,7 +1235,10 @@ impedance nets are being routed as plain microstrip.
 prefer to keep one group's copper GAP mm (edge to edge, same layer) from the
 other group's. It is a SOFT cost above the clearance, which stays the hard floor:
 while a net of either group routes, every cell inside the band around the other
-group's tracks, vias and pads costs extra. Nets of one group still route against
+group's tracks, vias, pads and pours (a pour's band is drawn from its zone
+outline) costs extra. A rule sees the routed layer only; append `:adjacent`
+(`AGG:VICTIM:GAP:adjacent`) to also price the other group's copper on the copper
+layers next to it, in plan view, when coupling to the next layer matters. Nets of one group still route against
 each other at the normal clearance. It exists for crosstalk on mixed-signal
 boards. It is NOT a spreading knob (that is `--track-proximity-cost`), and it
 costs search time and some wirelength, so **add a rule only when you are sure,
@@ -1258,8 +1261,9 @@ Most boards get none.
    function (`pad.pinfunction`, or the datasheet when that is empty). A net
    name alone is not evidence, and a generic `Net-(R12-Pad2)` is no evidence
    at all.
-4. **Both groups are routed copper.** A group that lives only on a plane is not
-   a keep-away subject.
+4. **The aggressor is routed or poured copper, the victim routed copper.** A
+   victim that lives only on a plane is not a keep-away subject; an aggressor
+   pour (a switch node's or a high-current net's) is, on its own layer.
 
 **Do NOT add one when:**
 - the board is purely digital;
@@ -1349,7 +1353,9 @@ list is graded on the PLACEMENT by `check_floorplan`, before any track exists.
 
 **Grade it, and report it.** A run with rules prints a `Keep-away (...)` line and
 writes `keep_away` into JSON_SUMMARY: `in_band_mm` and `nets_in_band`, plus
-per-net `in_band_mm`, `min_spacing_mm` and `closest_net`. The cost is soft, so
+per-net `in_band_mm`, `min_spacing_mm` and `closest_net`, with `not_measured`
+(what the rules did not look at: other layers for a rule without `:adjacent`)
+and, when a rule's net pours, `pour_measured_on`. The cost is soft, so
 in-band length that remains means the router found no other way through. That is
 a capacity answer (a corridor too narrow for the gap, or placement putting the
 groups side by side), and you must report it rather than hide it. Tell the two
@@ -2324,7 +2330,9 @@ re-routes the nets the step before it left open, with the same flags, so:
    copper, which neither a lap nor `--rip-existing-nets` moves (a rip lifts
    tracks and vias; the pads stay). Take that net to **A boxed-in net**
    (after Diagnose and Retry) and to placement. When every failed pad is
-   CAGED, run no lap. Measured on a test board: a pad ringed by four signal
+   CAGED, run no lap. INCONCLUSIVE (exit 3) is not CAGED: the throat is
+   inside the raster's resolution even after the tool's own refinement, so
+   lap for it, or re-measure on a small `--view` at a finer `--step`. Measured on a test board: a pad ringed by four signal
    pins came out of two laps and the rip route.py's Hint named with the same
    failed set and the same copper, while a pad reachable only over the
    priced planes (PASSABLE) was routed by the first lap.
@@ -3120,7 +3128,7 @@ toward ANY other net's copper on another layer, not toward its own net.
 ### Plane Via Placement Options (route_planes.py)
 
 - Multiple nets can share one plane layer (split round spines routed on it): `--nets GND VCC --plane-layers In2.Cu In2.Cu`
-- `--same-net-pad-clearance <mm>` (> 0) keeps every via the step places (stitching, thermal arrays, GND return vias) off same-net pads and their paste openings at that edge-to-edge clearance, and records it in the `.kicad_pro` so later steps inherit it (#581); default: the project's recorded value, else via-in-pad allowed
+- `--same-net-pad-clearance <mm>` (> 0) keeps every via the step places (stitching, thermal arrays, GND return vias) off same-net pads and their paste openings at that edge-to-edge clearance (an exposed pad's thermal array is exempt from its own pad, never from its paste, #2063), and records it in the `.kicad_pro` so later steps inherit it (#581); default: the project's recorded value, else via-in-pad allowed
 - The pour places NO tap vias and draws NO traces (#562), so it has no via-search or blocker-rip knobs: `--max-search-radius`, `--max-via-reuse-radius`, `--close-via-radius`, `--rip-blocker-nets`, `--max-rip-nets` and `--reroute-ripped-nets` are REMOVED. Do not emit them. Plane pads are welded by the route step's pour-launch and its in-run plane finalize.
 
 ### Net Ordering Strategies

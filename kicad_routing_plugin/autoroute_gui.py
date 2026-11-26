@@ -56,6 +56,15 @@ try:
 except Exception:                                               # noqa: BLE001
     DEFAULT_EFFORT_FACTOR, DEFAULT_PLANE_LAYER_COST = 2.0, -1.0
 
+
+def _drc_text(g):
+    """A grade's DRC count as the CLI's own lines say it (#2060): at relaxed
+    rules when a class was lowered, and the .kicad_dru rules not graded."""
+    try:
+        return _AR.drc_phrase(g).replace(' DRC', ' real DRC', 1)
+    except Exception:                                           # noqa: BLE001
+        return f"{g.get('drc')} real DRC"
+
 EVENT_TOKENS = ('AUTOROUTE_PLAN', 'AUTOROUTE_STEP', 'AUTOROUTE_DECISION',
                 'AUTOROUTE_SUMMARY', 'AUTOROUTE_ANALYSIS')
 
@@ -157,12 +166,43 @@ class AutorouteOptionsPanel(wx.Panel):
             "the planes (each stays a solid reference; later passes may cross at "
             "3.0); positive lets every step cross them. Not 0.")
         grid.Add(self.plane_layer_cost, 0)
+        self.board_rules = wx.CheckBox(self, label="Board's own rules (--board-rules)")
+        self.board_rules.SetToolTip(
+            "Route to the board's declared rules: its Default net class's clearance, "
+            "track width, via and diff-pair gap/width, held at its Board Setup "
+            "minimums, every other class at its own, and a net that cannot complete "
+            "there narrowed only down to those minimums (--escalation board).")
+        grid.Add(self.board_rules, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.AddSpacer(0)
+        self.floor_first = wx.CheckBox(self, label="Start at the fab floor (--floor-first)")
+        self.floor_first.SetToolTip(
+            "Start every step at the fab floor (the deepest tier) instead of the "
+            "standard tier with the floor below it as the size rung the chain "
+            "steps down to.")
+        grid.Add(self.floor_first, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.AddSpacer(0)
+        self.keep_placement = wx.CheckBox(self, label="Keep placement (--keep-placement)")
+        self.keep_placement.SetToolTip(
+            "No step moves a part: the decap step, which moves decoupling caps off "
+            "the fanout copper, is not run.")
+        grid.Add(self.keep_placement, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.AddSpacer(0)
+        self.write_fill = wx.CheckBox(self, label="Write filled zones (--write-fill)")
+        self.write_fill.SetToolTip(
+            "Write the shipped board with its zones filled by KiCad's own filler, so "
+            "it reads no phantom plane opens when opened or graded before a refill.")
+        grid.Add(self.write_fill, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.AddSpacer(0)
         self.SetSizer(grid)
 
     def get_config(self):
         return {'finish': self.finish.GetValue(),
                 'effort_factor': self.effort_factor.GetValue(),
-                'plane_layer_cost': self.plane_layer_cost.GetValue()}
+                'plane_layer_cost': self.plane_layer_cost.GetValue(),
+                'board_rules': self.board_rules.GetValue(),
+                'floor_first': self.floor_first.GetValue(),
+                'keep_placement': self.keep_placement.GetValue(),
+                'write_fill': self.write_fill.GetValue()}
 
     def set_config(self, cfg):
         try:
@@ -172,12 +212,18 @@ class AutorouteOptionsPanel(wx.Panel):
                 self.effort_factor.SetValue(float(cfg['effort_factor']))
             if 'plane_layer_cost' in cfg:
                 self.plane_layer_cost.SetValue(float(cfg['plane_layer_cost']))
+            for key in ('board_rules', 'floor_first', 'keep_placement', 'write_fill'):
+                if key in cfg:
+                    getattr(self, key).SetValue(bool(cfg[key]))
         except (TypeError, ValueError):
             pass  # a malformed saved dict must not break dialog restore
 
     def reset_to_defaults(self):
         self.set_config({'finish': False, 'effort_factor': DEFAULT_EFFORT_FACTOR,
-                         'plane_layer_cost': DEFAULT_PLANE_LAYER_COST})
+                         'plane_layer_cost': DEFAULT_PLANE_LAYER_COST,
+                         'board_rules': False, 'floor_first': False,
+                         'keep_placement': False,
+                         'write_fill': False})
 
     def cli_args(self):
         """The options as autoroute.py arguments; raises ValueError for one the
@@ -189,6 +235,12 @@ class AutorouteOptionsPanel(wx.Panel):
                 '--plane-layer-cost', f"{cfg['plane_layer_cost']:g}"]
         if cfg['finish']:
             args.append('--finish')
+        if cfg.get('board_rules') and cfg.get('floor_first'):
+            raise ValueError("Board's own rules and Start at the fab floor pick "
+                             "different starting sizes (the CLI refuses both).")
+        for key in ('board_rules', 'floor_first', 'keep_placement', 'write_fill'):
+            if cfg.get(key):
+                args.append('--' + key.replace('_', '-'))
         return args
 
 
@@ -748,7 +800,7 @@ class AutorouteTab(wx.Panel):
             out.append(f"Decision: {'kept' if d.get('kept') else 'not kept'} -- {d.get('why')}")
         g = row.get('grade')
         if g:
-            out.append(f"Grade: {g.get('open')} open net(s), {g.get('drc')} real DRC"
+            out.append(f"Grade: {g.get('open')} open net(s), {_drc_text(g)}"
                        + (f"; open: {', '.join(g.get('open_nets')[:12])}"
                           if g.get('open_nets') else ""))
             for item in (g.get('drc_items') or [])[:10]:
@@ -804,7 +856,7 @@ class AutorouteTab(wx.Panel):
         elif ok:
             self.set_status(
                 f"Finished in {el}: shipped {s.get('final_tag')} -- "
-                f"{s.get('open')} open net(s), {s.get('drc')} real DRC. "
+                f"{s.get('open')} open net(s), {_drc_text(s)}. "
                 f"Review, then Apply Result to Board.")
             self._summary_value = self._final_summary(s)
             self._render_info()
@@ -849,7 +901,7 @@ class AutorouteTab(wx.Panel):
                  f"{s.get('open')} open net(s)"
                  + (f" ({', '.join(open_nets[:8])}{' ...' if len(open_nets) > 8 else ''})"
                     if open_nets else "")
-                 + f", {s.get('drc')} real DRC" + (f"; {s['note']}" if s.get('note') else "")]
+                 + f", {_drc_text(s)}" + (f"; {s['note']}" if s.get('note') else "")]
         if counts:
             lines.append(
                 f"Apply makes the open board match it: {counts['tracks'] + counts['arcs']} "

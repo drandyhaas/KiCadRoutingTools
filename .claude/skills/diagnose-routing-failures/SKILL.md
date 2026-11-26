@@ -174,7 +174,15 @@ And across the buckets:
     same vocabulary), not the per-side `delta_mm`. The chain's tolerance is
     recorded on the board, so `check_drc` grades it end to end
     (`chain-skew-out-of-range`) and `board_score` counts it (#1799). Not the
-    `pair_reports` `outcome` of the same name, a different field.
+    `pair_reports` `outcome` of the same name, a different field. A chain
+    whose halves are `electrically-short` is still matched end to end, on the
+    copper the step's single-ended fallback laid (#1980). Its row reads
+    `not-matchable` with `member-deferred-electrically-short` when the
+    fallback did not connect a half (`se_fallback` `failed`): no later step
+    matches the chain (`route.py` has no end-to-end pass), so the chain ships
+    at whatever skew the follow-up leaves, which `check_drc` grades. Fix
+    that half's connection in this step (what blocks it, in the fallback's
+    log), not the chain.
   - `unmatched`: over the tolerance, or not measurable yet. `reason`:
     `no-room-for-meanders` (no bump fits beside the shorter leg),
     `meanders-would-worsen`, `meanders-ran-out` (the bumps that fit fall short),

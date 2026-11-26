@@ -3959,8 +3959,10 @@ def generate_underpad_escape(footprint: Footprint,
                 _sok = _sli is not None
 
                 def _sd(x1, y1, x2, y2):
-                    return min(_pt_seg_d(x1, y1, _ax, _ay, _bx, _by), _pt_seg_d(x2, y2, _ax, _ay, _bx, _by),
-                               _pt_seg_d(_ax, _ay, x1, y1, x2, y2), _pt_seg_d(_bx, _by, x1, y1, x2, y2))
+                    # 0 for a crossing: the endpoint terms alone read a
+                    # foreign track crossing the strap mid-span as clear
+                    from geometry_utils import segment_to_segment_distance
+                    return segment_to_segment_distance(x1, y1, x2, y2, _ax, _ay, _bx, _by)
                 if _sok:
                     _sok = not any(sl == _sli and snid != _sp.net_id and _sd(x1, y1, x2, y2) < _hw + hw_ + clearance + _cx(snid) - 1e-6
                                    for (x1, y1, x2, y2, hw_, snid, sl) in exact_segs)

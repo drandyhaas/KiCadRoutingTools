@@ -1543,6 +1543,31 @@ def refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
         add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[nid])
 
 
+def committed_net_ids(result, own_ids) -> list:
+    """The nets a committed route result put copper on: `own_ids` (the pair's
+    P and N, or the one net) first, then every other net its new segments and
+    vias carry. What a caller passes to refresh_net_obstacles after
+    add_route_to_pcb_data, so the working map refreshes EVERY net the commit
+    touched, not just the ones it routed.
+
+    A diff-pair result carries the pair's companion GND return vias
+    (diff_pair_routing._create_gnd_vias) on the return net: the commit put
+    them on the board while the refresh named only P and N, so the working
+    map never blocked them. Measured on scalenode_cm4's diff-pair step with
+    KICAD_OBSTACLE_AUDIT: GND the one stale entry, 1264 of its 25898 cells
+    and 173 via cells unblocked -- the 7 return vias the step laid -- which a
+    ripped victim's reroute or a terminal restore then searched blind to.
+    Net 0 (no net) is never a cache entry and is skipped."""
+    out = list(own_ids)
+    seen = set(out)
+    extra = set()
+    for item in list((result or {}).get('new_segments') or []) + list((result or {}).get('new_vias') or []):
+        nid = getattr(item, 'net_id', None)
+        if nid and nid not in seen:
+            extra.add(nid)
+    return out + sorted(extra)
+
+
 # =============================================================================
 # Via Placement Obstacle Cache
 # =============================================================================

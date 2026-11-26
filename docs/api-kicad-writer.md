@@ -72,8 +72,18 @@ Via dicts:
  'size': 0.6, 'drill': 0.3,        # mm
  'layers': ['F.Cu', 'B.Cu'],
  'net_id': 42,
- 'free': False}                    # optional; True adds (free yes)
+ 'free': False}                    # optional; True marks the via free
 ```
+
+A FREE via keeps the net the file gives it: KiCad's connectivity pass never
+re-nets it from the copper it touches. Set it on a via whose only connection
+is its pour (stitching and fence vias, GND return vias), as KiCad's own via
+tool does for a via placed on a zone with no track or pad under it; without
+it `pcbnew.LoadBoard` and kicad-cli give such a via the net of any stored
+fill of another net it sits in (#2067). The token follows the board's file
+format (`via_free_sexpr`): `(free yes)` from KiCad 8's format on
+(`FREE_VIA_BOOL_MIN_VERSION`), a bare `(free)` before it, which is all a KiCad
+6/7 reader takes. The writers pass `file_version=` for it.
 
 A via dict that re-emits a via the board already had also carries that via's
 `'tenting_attrs'`, `'inherit_when_unspecified': True` and `'via_type'` (see
@@ -152,7 +162,8 @@ yourself:
 generate_segment_sexpr(start, end, width, layer, net_id, net_name=None) -> str
 generate_via_sexpr(x, y, size, drill, layers, net_id,
                    free=False, net_name=None, tenting_attrs=None,
-                   inherit_when_unspecified=False, via_type=None) -> str
+                   inherit_when_unspecified=False, via_type=None,
+                   file_version=None) -> str
 generate_gr_line_sexpr(start, end, width, layer) -> str      # debug graphics
 generate_gr_text_sexpr(text, x, y, layer, size=0.5, angle=0) -> str
 generate_zone_sexpr(net_id, net_name, layer, polygon_points,

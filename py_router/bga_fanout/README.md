@@ -202,6 +202,30 @@ class is; plane drops hold it the same way. What still falls short is reported
 unescaped. The run prints `.kicad_dru: N class/type-scoped ... clearance
 rule(s) held by this escape (#1565)`. A board with no such rule is unchanged.
 
+A rule scoped with `(layer ...)` (#1897) is held too: it binds nothing asked
+without a layer, so the check that sends a part's escape to the grading asks
+it on each layer it names.
+
+## A rule area over the ball field (#1843)
+
+KiCad's last matching rule wins. A `.kicad_dru` clearance rule on a rule area
+(`A.insideArea('ROOM')`, `intersectsArea`, read as the route steps read it:
+`area_clearance`, `design_rules.AreaIndex`) binds every pair either item of
+which meets the area, and replaces the net classes and every rule before it in
+the file. When such an area encloses every ball, on every copper layer, and no
+later area rule reaches the ball field (`area_view.part_view`), the escape is
+spaced at the room's view: no class map, only the layer and class/type-scoped
+rules after the room's rule, the run clearance raised to the room's value if
+the room tightens it, and no rescue rung below it. The grading then prices a
+pair touching the area at that view and a pair wholly outside it at the full
+rules, so escape copper laid past the area still holds a wide class-pair rule
+there (and is re-escaped when it does not). The run prints `Rule area: U1's
+ball field lies in rule ...`. An area rule the reader cannot take for the
+whole field (its condition is more than area predicates, its area misses a
+ball or a copper layer) leaves the escape at the class and rule values, the
+wider side, and the run says why. Plane drops and `qfn_fanout.py` keep the
+class and rule values.
+
 The writeback treats the classes as `route.py` does: kept without
 `--clearance-ceiling`, each capped at `min(class, ceiling)` with it -- so a
 class whose nets the part does not touch keeps its value. It used to lower

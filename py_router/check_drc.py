@@ -2667,6 +2667,29 @@ def _net_tie_span_waived(pcb_data, seg, seg_net: int, partner_pad, clearance: fl
         for cx, cy in contacts)
 
 
+def segment_to_pad_copper_distance(x1: float, y1: float, x2: float, y2: float,
+                                   pad) -> float:
+    """Edge distance from segment (x1, y1)-(x2, y2) to `pad`'s COPPER, measured
+    as check_pad_segment_overlap measures it: a custom pad's polygons, else its
+    rectangle in the pad's own frame (a tilted pad's `rect_rotation`) with the
+    shape's corner radius (`pad_corner_radius`: a circle or oval is exact).
+    For a generator's own clearance test, so it refuses only what this checker
+    flags: a round pad read as its bounding square refused legal copper beside
+    it (#2004, #2010). Callers skip an NPTH pad, which has no copper."""
+    polys = getattr(pad, 'polygons', None)
+    if polys:
+        return _segment_to_polys_distance(x1, y1, x2, y2, polys)[0]
+    rot = getattr(pad, 'rect_rotation', 0.0) or 0.0
+    if rot:
+        rad = math.radians(rot)
+        cr, sr = math.cos(rad), math.sin(rad)
+        x1, y1 = _into_pad_frame(x1, y1, pad, cr, sr)
+        x2, y2 = _into_pad_frame(x2, y2, pad, cr, sr)
+    return segment_to_rect_distance(x1, y1, x2, y2, pad.global_x, pad.global_y,
+                                    pad.size_x / 2, pad.size_y / 2,
+                                    pad_corner_radius(pad))[0]
+
+
 def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
                                routing_layers: List[str],
                                clearance_margin: float = 0.05) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
@@ -2839,19 +2862,41 @@ class HoleRuleBinder:
     `hole_rule_grade` grades with, and that a generator pricing a pair before
     it lays it asks (`pad_via_hole_required`). ``dr`` is the board's
     `design_rules.DesignRules`; `walk` is empty when it declares no
-    hole_clearance rule."""
+    hole_clearance rule.
 
-    def __init__(self, dr):
+    A rule scoped by a rule area (`Rule.area_scoped_condition`) binds by
+    where each item stands, as kicad-cli 10.0.8 grades it: ``board`` (the
+    board the items are on; a generator's view of it will do) has its rule
+    areas measured (`DesignRules.area_index`), so every item's RuleItem
+    carries the areas its copper overlaps, per layer. Without ``board``, or
+    for an item not measured, such a rule reads as unknown, as before."""
+
+    def __init__(self, dr, board=None):
         from design_rules import parse_condition_maybe, rule_may_match
         self._match = rule_may_match
         self.dr = dr
         self.walk = []
-        for r in (dr.rules if dr is not None else ()):
+        rules = list(dr.rules) if dr is not None else []
+        if board is not None and getattr(board, 'board_info', None) is not None and any(
+                'hole_clearance' in r.constraints and r.area_scoped_condition is not None
+                for r in rules):
+            try:
+                dr.area_index(board)
+            except Exception:                                   # noqa: BLE001
+                pass                    # the rule stays unknown, and is named
+        measured = dr is not None and getattr(dr, '_area_index', None) is not None
+        #: the rules that bind by position (by a rule area)
+        self.positional = set()
+        for r in rules:
             spec = r.constraints.get('hole_clearance')
             if spec is None:
                 continue
-            ast = (('unknown',) if str(r.unsupported or '').startswith('constraint')
-                   else parse_condition_maybe(r.condition_src))
+            if measured and r.area_scoped_condition is not None:
+                ast = r.area_scoped_condition
+                self.positional.add(id(r))
+            else:
+                ast = (('unknown',) if str(r.unsupported or '').startswith('constraint')
+                       else parse_condition_maybe(r.condition_src))
             self.walk.append((r, ast, spec.get('min') or 0.0))
         #: the widest value a reporting rule asks, 0.0 with none
         self.reach = max([mn for r, _a, mn in self.walk
@@ -2888,7 +2933,11 @@ class HoleRuleBinder:
         if key not in self._decided:
             out = None
             for r, ast, _mn in reversed(self.walk):
-                m = self._match(r, ast, a, b, layer, self.dr.copper_layers, self.ctx)
+                if id(r) in self.positional and (
+                        a.area_layers is None or (b is not None and b.area_layers is None)):
+                    m = None            # an item whose areas were not measured
+                else:
+                    m = self._match(r, ast, a, b, layer, self.dr.copper_layers, self.ctx)
                 if m is None:
                     out = ('unknown', r)
                     break
@@ -2974,7 +3023,8 @@ def pad_via_hole_required(pad, via, via_hole_clearance, board_copper, binder=Non
 
 def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
                     clearance_margin: float = 0.05, matching_net_ids=None,
-                    board_min=None, no_copper_floor=None, pad_pair_clearance=None):
+                    board_min=None, no_copper_floor=None, pad_pair_clearance=None,
+                    area_board=None):
     """The copper-to-hole rows KiCad's hole_clearance makes, graded as
     kicad-cli 10.0.6 grades them (measured on probe boards: every via drill,
     plated and NPTH hole against the copper of every track, via and pad of
@@ -3014,12 +3064,17 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
     copper clearance of a pad pair, which decides the pad-vs-pad-hole yield
     (else the rules' own resolver, else no yield).
 
+    A rule scoped by a rule area binds by where each item stands
+    (`HoleRuleBinder`); ``area_board`` is the board whose rule areas are
+    measured when ``pcb_data`` is a view of it that carries none (a gate's
+    copper near its candidates), else ``pcb_data``.
+
     Returns (rows, unread): unread maps a rule whose condition is not read
     here, and that may bind a pair close enough to be flagged, to why. A pair
     such a rule may bind is graded at the board minimum (None: not graded)."""
     from kicad_parser import pad_drill_capsule, plated_drill_exposed, flush_drill_peg
     from design_rules import override_clearance
-    binder = HoleRuleBinder(dr)
+    binder = HoleRuleBinder(dr, area_board if area_board is not None else pcb_data)
     grading = board_min is not None
     if not binder.walk and not grading:
         return [], {}
@@ -3421,7 +3476,7 @@ def _hole_gate_verdict(board, pcb_data, dr, segments, vias) -> str:
     copper = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
                   or dr.copper_layers)
     nets = {getattr(i, 'net_id', 0) for i in list(segments) + list(vias)}
-    rows, _unread = hole_rule_grade(board, dr, copper, 0.0, 0.0, nets)
+    rows, _unread = hole_rule_grade(board, dr, copper, 0.0, 0.0, nets, area_board=pcb_data)
     via_at = {(round(v.x, 6), round(v.y, 6)) for v in vias}
     seg_at = {(round(s.start_x, 6), round(s.start_y, 6), round(s.end_x, 6),
                round(s.end_y, 6), s.layer) for s in segments}
@@ -3708,7 +3763,7 @@ def hole_rule_step_rows(pcb_data, dr, segments=(), vias=()):
     copper = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
                   or dr.copper_layers)
     nets = {s.net_id for s in segs} | {v.net_id for v in vs}
-    rows, _unread = hole_rule_grade(board, dr, copper, 0.0, 0.0, nets)
+    rows, _unread = hole_rule_grade(board, dr, copper, 0.0, 0.0, nets, area_board=pcb_data)
     name_to_id = {n.name: nid for nid, n in pcb_data.nets.items() if n.name}
     out = []
     for r in rows:
@@ -3961,6 +4016,113 @@ def laid_copper_edge_clearance(pcb_data, clearance: float) -> float:
         from list_nets import board_constraint
         declared = board_constraint(src, 'min_copper_edge_clearance') or 0.0
     return max(declared if declared > 0 else clearance, fab_edge_floor())
+
+
+def new_copper_refusal(segs, vias, pcb_data, config) -> str:
+    """'' when every piece of not-yet-laid copper clears the board's existing
+    copper of OTHER nets, else why not -- graded with this module's own
+    primitives at `config.pair_clearance` (the clearance between two nets'
+    copper), with no tolerance: tracks against tracks on their layer, against
+    vias and pads; barrels against tracks, vias, pads and drills
+    (hole-to-hole on any net, vias' and pads'). Plated copper is held at the
+    copper clearance, as the router holds it; `config.hole_clearance` is the
+    floor for an NPTH wall, graded at its drill; the board's .kicad_dru hole
+    rules are graded by `hole_rule_refusal`.
+
+    For copper a generator lays as GIVEN geometry, or commits from a search
+    whose map could not see the board as it is: the diff-pair crossover
+    (#1055; a barrel on the partner's pad, a leg into a routed pair's track)
+    and the KiCad-oracle's rescue vias (#2010)."""
+    segs, vias = list(segs), list(vias)
+    if not segs and not vias:
+        return ''
+    layers = list(config.layers)
+    hc = getattr(config, 'hole_clearance', 0.0) or 0.0
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+    xs, ys = [], []
+    for s in segs:
+        xs += [s.start_x, s.end_x]
+        ys += [s.start_y, s.end_y]
+    for v in vias:
+        xs.append(v.x)
+        ys.append(v.y)
+    reach = 2.0 + max([config.via_size, config.track_width, hc, h2h] + [v.size for v in vias])
+    x0, x1, y0, y1 = min(xs) - reach, max(xs) + reach, min(ys) - reach, max(ys) + reach
+
+    def near(ax, ay, bx=None, by=None):
+        bx = ax if bx is None else bx
+        by = ay if by is None else by
+        return not (max(ax, bx) < x0 or min(ax, bx) > x1 or max(ay, by) < y0 or min(ay, by) > y1)
+
+    b_segs = [t for t in pcb_data.segments if near(t.start_x, t.start_y, t.end_x, t.end_y)]
+    b_vias = [w for w in pcb_data.vias if near(w.x, w.y)]
+    b_pads = [p for fp in pcb_data.footprints.values() for p in fp.pads if near(p.global_x, p.global_y)]
+
+    def clr(a, b, layer=None):
+        return config.pair_clearance(a, b, layer) if hasattr(config, 'pair_clearance') else config.clearance
+
+    def npth(p):
+        return p.pad_type == 'np_thru_hole'
+
+    def to_hole(px, py, p, x1, y1, x2=None, y2=None):
+        """Distance from a point (or segment) to `p`'s drill capsule edge."""
+        from kicad_parser import pad_drill_capsule
+        (c1x, c1y), (c2x, c2y), prad = pad_drill_capsule(p)
+        if x2 is None:
+            from geometry_utils import point_to_segment_distance
+            return point_to_segment_distance(x1, y1, c1x, c1y, c2x, c2y) - prad
+        from geometry_utils import segment_to_segment_distance
+        return segment_to_segment_distance(x1, y1, x2, y2, c1x, c1y, c2x, c2y) - prad
+
+    # Plated barrels and plated pads are held at the copper clearance -- the
+    # router's own rule (its run says "plated holes and vias: copper
+    # clearance"; the via's ring and the DRC-floor writeback keep KiCad's
+    # min_hole_clearance consistent with it). `hc` is the floor for an NPTH
+    # wall only, which has no copper (an NPTH pad's size is its mask
+    # opening): an NPTH hole is graded by its drill, never as copper. #2010:
+    # raising every barrel by hc refused a rescue via 0.1615 off a track's
+    # hole edge on a board whose rule was 0.155, KiCad clean.
+    for s in segs:
+        for t in b_segs:
+            if t.net_id != s.net_id and t.layer == s.layer \
+                    and check_segment_overlap(s, t, clr(s.net_id, t.net_id, s.layer), 0.0)[0]:
+                return f'track {s.layer} grazes net {t.net_id} track'
+        for w in b_vias:
+            if w.net_id != s.net_id and check_via_segment_overlap(
+                    w, s, clr(s.net_id, w.net_id, s.layer), 0.0)[0]:
+                return f'track {s.layer} grazes net {w.net_id} via'
+        for p in b_pads:
+            if npth(p):
+                if p.drill and to_hole(0, 0, p, s.start_x, s.start_y, s.end_x, s.end_y) \
+                        < s.width / 2.0 + max(hc, clr(s.net_id, 0, s.layer)) - 1e-6:
+                    return f'track {s.layer} within the NPTH floor of {p.component_ref}.{p.pad_number}'
+                continue
+            if p.net_id != s.net_id and check_pad_segment_overlap(
+                    p, s, clr(s.net_id, p.net_id, s.layer), layers, 0.0)[0]:
+                return f'track {s.layer} grazes pad {p.component_ref}.{p.pad_number}'
+    for v in vias:
+        for t in b_segs:
+            if t.net_id != v.net_id and check_via_segment_overlap(
+                    v, t, clr(v.net_id, t.net_id, t.layer), 0.0)[0]:
+                return f'barrel grazes net {t.net_id} track on {t.layer}'
+        for w in b_vias:
+            if w.net_id != v.net_id and check_via_via_overlap(v, w, clr(v.net_id, w.net_id), 0.0)[0]:
+                return f'barrel grazes net {w.net_id} via'
+            if h2h > 0 and check_via_drill_overlap(v, w, h2h, 0.0)[0]:
+                return f'drill within hole-to-hole of net {w.net_id} via'
+        for p in b_pads:
+            if h2h > 0 and p.drill and check_pad_drill_via_overlap(p, v, h2h, 0.0)[0]:
+                return f'drill within hole-to-hole of {p.component_ref}.{p.pad_number}'
+            if npth(p):
+                if p.drill and to_hole(0, 0, p, v.x, v.y) \
+                        < v.size / 2.0 + max(hc, clr(v.net_id, 0)) - 1e-6:
+                    return f'barrel within the NPTH floor of {p.component_ref}.{p.pad_number}'
+                continue
+            if p.net_id != v.net_id and check_pad_via_overlap(
+                    p, v, clr(v.net_id, p.net_id), layers, 0.0)[0]:
+                return f'barrel grazes pad {p.component_ref}.{p.pad_number}'
+    why = hole_rule_refusal(pcb_data, getattr(config, 'rules', None), segs, vias)
+    return why or ''
 
 
 class BoardEdgeGate:
@@ -5825,10 +5987,17 @@ def keepout_census(pcb_data, routing_layers, tol=FP_EPS_MM, net_ids=None,
         layers = _keepout_area_layers(ko, routing_layers)
         base = {'type': 'keepout', 'area': ko.get('name') or '',
                 'area_in_footprint': bool(ko.get('in_footprint'))}
+        # #2022: a finger column binds every net but its finger's, a tail
+        # only that one; every other area binds every item
+        bound = (ko.get('nets') if ko.get('finger_band') in ('column', 'tail')
+                 else None)
         if segs and not ko.get('tracks_allowed', True) and layers:
             cand = np.nonzero(np.isin(slayer, layers)
                               & (lo_x <= bx1) & (hi_x >= bx0)
                               & (lo_y <= by1) & (hi_y >= by0))[0]
+            if bound is not None:
+                cand = np.array([i for i in cand.tolist()
+                                 if _net(segs[i].net_id) in bound], dtype=np.int64)
             if len(cand):
                 if lines is None:
                     lines = shapely.linestrings(np.stack(
@@ -5929,7 +6098,8 @@ def copper_keepout_gate(pcb_data, net_keepouts=None):
       `net_keepouts.audit_items`, the geometry the end-of-run audit and
       KiCad's items_not_allowed read.
     Copper is the centreline grown by half its width (a via: its disk), as
-    KiCad grades a rule area; no clearance is added.
+    KiCad grades a rule area; no clearance is added, but for a part's
+    clearance region (#2071), whose own `clearance` is the distance kept.
 
     Returns None when nothing on the board forbids copper (the caller adds no
     test), else `refuses(segments=(), vias=())` -> the reason the first
@@ -5948,8 +6118,11 @@ def copper_keepout_gate(pcb_data, net_keepouts=None):
     if not plain and not netko:
         return None
     plain_boxes = [_ring_box(ko['polygon']) for ko in plain]
-    net_boxes = [None if ko.get('layer_ban') else _ring_box(ko['polygon'])
-                 for ko in netko]
+    # a part's clearance region (#2071) keeps copper its `clearance` off
+    # the ring, as `audit_items` reads it
+    net_boxes = [None if ko.get('layer_ban') else tuple(
+        v + (float(ko.get('clearance') or 0.0) * (1 if i > 1 else -1))
+        for i, v in enumerate(_ring_box(ko['polygon']))) for ko in netko]
 
     def refuses(segments=(), vias=()):
         segs = [s for s in segments if not getattr(s, 'graphic', False)]
@@ -6037,6 +6210,8 @@ def _keepout_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
     kicad_drc_compare keeps these on a labelled channel of their own."""
     _finger_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
                  violations, accepted, tol, quiet)
+    _finger_band_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
+                      violations, accepted, tol, quiet)
     rows = keepout_census(pcb_data, routing_layers, tol=tol,
                           net_ids=matching_net_ids)
     inherited = set()
@@ -6077,6 +6252,58 @@ def contact_finger_areas(pcb_data):
     from net_keepouts import derive_contact_fingers
     return [dict(ko, in_footprint=True, contact_finger=True)
             for ko in derive_contact_fingers(pcb_data)]
+
+
+def finger_band_areas(pcb_data):
+    """The finger strips of an edge connector (#2022), as `keepout_census`
+    reads an area: the regions the router keeps copper out of
+    (`net_keepouts.derive_finger_bands`). [] when the board has none."""
+    from net_keepouts import derive_finger_bands
+    return [dict(ko, in_footprint=True) for ko in derive_finger_bands(pcb_data)]
+
+
+def _finger_band_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
+                      violations, accepted, tol, quiet):
+    """#2022: copper in an edge connector's finger strip, as `keepout` rows
+    (`finger_band` 'via', 'column' or 'tail'): any net's via in the strip, a
+    track of another net in a finger's column (between the fingers or along
+    the strip past them), and a finger's own track past its outer end. The
+    socket wipes the strip and the edge past it is bevelled; KiCad grades
+    none of it, so this is check_drc's own finding. Copper the `--baseline`
+    board already had there is accepted `inherited-keepout`."""
+    areas = finger_band_areas(pcb_data)
+    if not areas:
+        return
+    rows = keepout_census(pcb_data, routing_layers, tol=tol,
+                          net_ids=matching_net_ids, areas=areas)
+    kind = {ko['name']: ko['finger_band'] for ko in areas}
+    # a via is in every layer's band of its run: one row per via
+    seen, kept = set(), []
+    for r in rows:
+        r['finger_band'] = kind.get(r['area'])
+        if r['item'] == 'via':
+            key = (r.get('via_loc'), r['area'].rsplit(' ', 1)[0])
+            if key in seen:
+                continue
+            seen.add(key)
+        kept.append(r)
+    rows = kept
+    inherited = set()
+    if rows and baseline_pd is not None:
+        inherited = {_keepout_key(r) for r in keepout_census(
+            baseline_pd, routing_layers, tol=tol,
+            areas=finger_band_areas(baseline_pd))}
+    n_viol, n_inh = _accept_inherited(rows, inherited, violations, accepted)
+    if quiet or not rows:
+        return
+    by = {}
+    for r in rows:
+        by[r['finger_band']] = by.get(r['finger_band'], 0) + 1
+    print("Copper in an edge connector's finger strip: %d (violations: %s), "
+          "%d inherited from --baseline (accepted)%s" % (
+              n_viol, ', '.join(f"{n} {k}" for k, n in sorted(by.items())), n_inh,
+              '; pass --baseline <input board> to accept the copper the board '
+              'already had there' if n_viol and baseline_pd is None else ''))
 
 
 def _finger_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
@@ -7591,6 +7818,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                       "each track, via and pad stands: "
                       + ", ".join(f"'{r.name}':{r.constraints['clearance']['min']:g}"
                                   for r in _cy_dr.rules if r.name in _area_clr))
+    # #2071: a clearance rule bound to one part (`B.Reference == 'C12'`,
+    # `B.memberOfFootprint('C12')`) is evaluable, and no channel above prices
+    # one part: each pair is resolved pair-exact instead (`_cy_pair`), so the
+    # rule's value stands wherever the resolver lands on it.
+    if _cy_dr is not None:
+        from design_rules import part_scoped_clearance_rule
+        _part_clr = frozenset(r.name for r in _cy_dr.rules if part_scoped_clearance_rule(r))
+        if _part_clr:
+            _cy_clr = _cy_clr | _part_clr
+            _unmodelled_clr = [row for row in _unmodelled_clr if row[0] not in _part_clr]
+            if not quiet:
+                print("Part-scoped clearance rules (.kicad_dru, #2071), graded pair by pair "
+                      "on the named parts' pads: "
+                      + ", ".join(f"'{r.name}':{r.constraints['clearance']['min']:g}"
+                                  for r in _cy_dr.rules if r.name in _part_clr))
     _cy_items: Dict[int, tuple] = {}
 
     def _cy_item(obj):
@@ -7653,14 +7895,26 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     _hole_named: Set[str] = set()
     if _cy_dr is not None and any('hole_clearance' in r.constraints for r in _cy_dr.rules):
         _hole_dr = _cy_dr
+        # a rule scoped by a rule area the board draws binds by where each
+        # item stands (`HoleRuleBinder`, the rule areas measured above)
+        _hole_by_area = {r.name for r in _hole_dr.rules
+                         if 'hole_clearance' in r.constraints
+                         and r.area_scoped_condition is not None
+                         and getattr(_hole_dr, '_area_index', None) is not None}
         _hole_graded = [r for r in _hole_dr.rules if 'hole_clearance' in r.constraints
                         and r.unsupported is None]
         if _hole_graded and not quiet:
             print("Hole-clearance rules (.kicad_dru), graded hole to copper: "
                   + ", ".join(f"'{r.name}':{(r.constraints['hole_clearance'].get('min') or 0):g}"
                               for r in _hole_graded))
+        if _hole_by_area and not quiet:
+            print("Area-scoped hole-clearance rules (.kicad_dru), graded by where each "
+                  "hole and copper item stands: "
+                  + ", ".join(f"'{r.name}':{(r.constraints['hole_clearance'].get('min') or 0):g}"
+                              for r in _hole_dr.rules if r.name in _hole_by_area))
         for r in _hole_dr.rules:
             if ('hole_clearance' not in r.constraints or r.unsupported is None
+                    or r.name in _hole_by_area
                     or r.severity in ('warning', 'ignore', 'exclusion')):
                 continue
             _hole_named.add(r.name)
@@ -7740,6 +7994,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         if cy_rule:
             v['required_mm'] = eff
             v['courtyard_rule'] = cy_rule
+            # the rule's name on the row's console line, as KiCad names it
+            v['required_source'] = f"rule '{cy_rule}'"
         return v
 
     # Resolve the fab-floor minimums for the track-width / via-size checks. Default
@@ -8504,6 +8760,14 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if pair_key in via_via_checked:
                 continue
             via_via_checked.add(pair_key)
+            # Two vias whose copper shares no layer (a F.Cu-In1.Cu micro via
+            # over an In6.Cu-B.Cu one) have no copper to clear; their holes
+            # are graded by the hole checks. A board that lists no copper
+            # layers says nothing either way, so the pair is graded.
+            _l1 = set(via_copper_layers(via1, _board_copper))
+            _l2 = set(via_copper_layers(via2, _board_copper))
+            if _l1 and _l2 and not (_l1 & _l2):
+                continue
 
             _eff = (apply_layer_rules(*_pair_rules(net1, net2, (('via', None), ('via', None))),
                                       stack=True)
@@ -10788,7 +11052,10 @@ if __name__ == "__main__":
                               if v.get('accepted') == 'inherited-keepout'),
                 # #1116: of the violations, vias in a contact finger
                 contact_finger=sum(1 for v in _real if v.get('type') == 'keepout'
-                                   and v.get('contact_finger'))),
+                                   and v.get('contact_finger')),
+                # #2022: and copper in an edge connector's finger strip
+                finger_band=sum(1 for v in _real if v.get('type') == 'keepout'
+                                and v.get('finger_band'))),
             # `short`: copper of two nets in contact (SHORT_TYPES), never a
             # drill, hole or edge item whatever its overlap (#1558). A
             # crossing has no overlap to grade: it is contact (#1563).

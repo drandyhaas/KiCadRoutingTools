@@ -41,6 +41,7 @@ import time
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import kicad_locate
+from kicad_quiet import QUIET_WX_SOURCE
 from swig_compat import patch_swig_iterators as _patch_swig_iterators
 
 # #795: repin_netcodes_from_file() walks board.GetTracks() in the pcbnew
@@ -50,8 +51,9 @@ _patch_swig_iterators()
 
 EXACT_FILL_TIMEOUT = 300
 
-_REFILL_SCRIPT = """\
-import sys
+# The wx log goes to stderr before LoadBoard: a load warning (a missing font)
+# otherwise opens a modal box nobody closes, and the refill hangs to its timeout.
+_REFILL_SCRIPT = "import sys\n" + QUIET_WX_SOURCE + """\
 import pcbnew
 src = sys.argv[1]
 dst = sys.argv[2]
@@ -558,6 +560,22 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
     """
     return refill_islands_ex(board_file, timeout=timeout, verbose=verbose,
                              project_from=project_from)[0]
+
+
+def memoized_refill_islands(board_file: str, project_from: str = None
+                            ) -> Optional[Dict[Tuple[str, str],
+                                               List[List[Tuple[float, float]]]]]:
+    """The islands of a refill of `board_file` THIS PROCESS already made, or
+    None -- never a refill of its own: no pcbnew subprocess is spawned. Keyed
+    as `refill_islands_ex` keys its memo (the file's bytes and its effective
+    .kicad_pro / .kicad_dru), so a rewritten file or project reads as None.
+    For a reader that measures on KiCad's fill when the run already has it
+    and on something cheaper otherwise (the keep-away report, #2070)."""
+    import copy as _copy
+    _mk = _refill_memo_key(board_file, project_from)
+    if _mk is None or _mk not in _REFILL_MEMO:
+        return None
+    return _copy.deepcopy(_REFILL_MEMO[_mk])
 
 
 def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,

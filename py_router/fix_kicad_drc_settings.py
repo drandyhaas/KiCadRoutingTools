@@ -1220,24 +1220,15 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
             # measure the board they just wrote.
             from kicad_parser import parse_kicad_pcb
             pcb = parse_kicad_pcb(output_pcb)
-            objects = {
-                # Graphic copper is a shape, not a track (#908, #337) -- the
-                # same exclusion `scan_board_minima` makes below. Counting a
-                # filled fp_poly's stroke here told the reader that N tracks
-                # sit under the original floor when none of them is a track.
-                "min_track_width": [s.width for s in pcb.segments
-                                    if s.width and not getattr(s, 'graphic', False)],
-                "min_via_diameter": [v.size for v in pcb.vias if v.size
-                                     and getattr(v, 'via_type', None) != 'micro'],
-                "min_via_drill": [v.drill for v in pcb.vias if v.drill
-                                  and getattr(v, 'via_type', None) != 'micro'],
-                "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias
-                                          if v.size and v.drill and v.size > v.drill
-                                          and getattr(v, 'via_type', None) != 'micro'],
-            }
-            # #1843: and a track a rule area's track_width rule binds is graded
-            # at that rule, as `board_size_values` reads it
-            objects["min_track_width"] = _board_track_widths(pcb)
+            # The objects `board_size_values` reads: graphic copper is a
+            # shape, not a track (#908, #337) -- counting a filled fp_poly's
+            # stroke told the reader that N tracks sit under the original
+            # floor when none of them is a track; a track a rule area's
+            # track_width rule binds (#1843) and a via a .kicad_dru via rule
+            # binds (#1972) are graded at the rule.
+            _vals = board_size_values(pcb)
+            objects = {k: _vals[k] for k in ("min_track_width", "min_via_diameter",
+                                             "min_via_drill", "min_via_annular_width")}
         for key, _label, was, _now, _mv in relaxed:
             objs = list(objects.get(key) or [])
             if objs:
@@ -1295,6 +1286,22 @@ def _board_track_widths(pcb) -> list:
                                                s.end_y, s.layer, s.width))]
 
 
+def board_via_rule_test(pcb):
+    """#1972: `design_rules.via_rule_held_test` for the board ``pcb`` (its
+    own `.kicad_dru`, read beside ``pcb.source_path``), or None when no rule
+    sizes a via. A rules file that cannot be read is said on the console and
+    read as no rule, so every via counts against the Board Setup minimums,
+    as before."""
+    try:
+        from design_rules import via_rule_held_test
+        return via_rule_held_test(pcb)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  WARNING: the board's .kicad_dru via rules could not be read "
+              f"({type(e).__name__}: {e}); every via is measured against the "
+              f"Board Setup via minimums", file=sys.stderr)
+        return None
+
+
 def board_size_values(pcb) -> dict:
     """Every size a measurable fab floor is a statement about, per
     :data:`FAB_FLOOR_KEYS_MEASURABLE` key: ``{key: [mm, ...]}``, one value per
@@ -1314,8 +1321,14 @@ def board_size_values(pcb) -> dict:
     # (`micro_via_floors`), so the through vias keep the board's minimum.
     drilled = [v for v in pcb.vias if getattr(v, 'via_type', None) != 'micro']
     via_drills = [v.drill for v in drilled if v.drill]
+    # #1972: a via whose diameter, hole or ring a .kicad_dru rule sets is
+    # graded at the rule, not at the Board Setup minimum of that kind, so it
+    # says nothing about that minimum (`board_via_rule_test`)
+    held = board_via_rule_test(pcb)
+    free = ((lambda v, kind: not held(v, kind)) if held is not None
+            else (lambda v, kind: True))
     # Through-hole pad / via drills set the smallest hole diameter on the board.
-    hole = list(via_drills)
+    hole = [v.drill for v in drilled if v.drill and free(v, 'hole_size')]
     for fp in pcb.footprints.values():
         for pad in fp.pads:
             if getattr(pad, "drill", 0):
@@ -1324,10 +1337,12 @@ def board_size_values(pcb) -> dict:
         "min_track_width": [s.width for s in pcb.segments
                             if s.width and s.width > 0
                             and not getattr(s, 'graphic', False)],
-        "min_via_diameter": [v.size for v in drilled if v.size],
+        "min_via_diameter": [v.size for v in drilled
+                             if v.size and free(v, 'via_diameter')],
         "min_via_drill": via_drills,
         "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in drilled
-                                  if v.size and v.drill and v.size > v.drill],
+                                  if v.size and v.drill and v.size > v.drill
+                                  and free(v, 'annular_width')],
         "min_through_hole_diameter": hole,
     }
     # #1843: a track a rule area's track_width rule binds is graded at that
@@ -2055,12 +2070,15 @@ def pad_override_floor_record(records, rule_before, rule_after, uncapped):
 
     ``rule_before`` / ``rule_after``: the rule before and after this writer
     lowered it (mm; None / 0 = undeclared). ``uncapped``: what the writer
-    would have written WITHOUT the #530 pad-override cap -- its routed
-    clearance, under the ``.kicad_dru`` cap (#498), which is a board
-    declaration. The board's own minimum after the write is the smaller of
-    the board's minimum before it (unmasked through an earlier record) and
-    ``uncapped``; a rule below that was lowered for a pad override only, and
-    is recorded so ``--escalation board`` reads the board's value instead."""
+    would have written WITHOUT the #530 pad-override cap and the #498
+    ``.kicad_dru`` cap -- its routed clearance. A dru rule binds only the
+    items its condition names, and those route at the rule whatever the
+    escalation, so its value is not a minimum the board declares for every
+    other net (#2060). The board's own minimum after the write is the smaller
+    of the board's minimum before it (unmasked through an earlier record) and
+    ``uncapped``; a rule below that was lowered for a pad override or a dru
+    rule only, and is recorded so ``--escalation board`` reads the board's
+    value instead."""
     from fab_tiers import board_declared_min_clearance
 
     def _pos(v):
@@ -3280,12 +3298,13 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     except Exception:
         pass
     # #1369: what min_clearance would be WITHOUT the #530 pad-override cap
-    # (the routed clearance, under the dru cap), and the rule before this
-    # write -- the pad-override provenance record compares the two.
+    # and the #498 .kicad_dru cap -- the clearance the step routed the board
+    # at -- and the rule before this write; the provenance record compares
+    # the two. A dru rule binds only the items its condition names, so its
+    # value is not a minimum the board declares for everything else (#2060).
     _mc_uncapped = None
     if targets.get("min_clearance") is not None:
-        _mc_uncapped = min(v for v in (_class_clearance(targets), _dru_min)
-                           if v is not None)
+        _mc_uncapped = _class_clearance(targets)
     _mc_before = (((proj.get("board") or {}).get("design_settings") or {})
                   .get("rules") or {}).get("min_clearance")
     # #856: severities are the project author's statement of what counts as a
@@ -3331,8 +3350,9 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
         _rec1369 = (proj.get("kicad_routing_tools") or {}).get(PAD_OVERRIDE_FLOOR_KEY)
         changes = list(changes) + [
             f"kicad_routing_tools.{PAD_OVERRIDE_FLOOR_KEY}: "
-            + (f"rules.min_clearance {_rec1369['rule']} mm is a pad clearance "
-               f"override; the board's own is {_rec1369['board']} mm"
+            + (f"rules.min_clearance {_rec1369['rule']} mm is capped at a pad "
+               f"clearance override or a .kicad_dru clearance; the board's own "
+               f"is {_rec1369['board']} mm"
                if _rec1369 else "dropped (the rule is the board's own)")]
         LAST_PROJECT_WRITES[:] = list(changes)
     # #1160: a Default class lowered by an automatic descent, not a request.
@@ -3576,12 +3596,12 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
             targets["min_clearance"] = _dru_min
     except Exception:
         pass
-    # #1369: min_clearance without the #530 pad-override cap, for the
-    # provenance record (fix_project_for_output's twin).
+    # #1369: min_clearance without the #530 pad-override cap or the #498
+    # .kicad_dru cap, for the provenance record (fix_project_for_output's
+    # twin, #2060).
     _mc_uncapped = None
     if targets.get("min_clearance") is not None:
-        _mc_uncapped = min(v for v in (_class_clearance(targets), _dru_min)
-                           if v is not None)
+        _mc_uncapped = _class_clearance(targets)
 
     # rule key -> BOARD_DESIGN_SETTINGS attribute (units: nm). Only loosen.
     attr = {

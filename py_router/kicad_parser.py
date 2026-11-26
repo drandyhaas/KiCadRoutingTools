@@ -7,7 +7,11 @@ from __future__ import annotations
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': [], 'kind': 'instrument'}
 
+import collections
 import functools
+import hashlib
+import pickle
+import threading
 from array import array
 import os
 import re
@@ -5875,7 +5879,8 @@ _VIA_PREFIX_RE = re.compile(
 # -- the same disappearance #748 is about, by a different route.
 _VIA_NET_RE = re.compile(r'\(net\s+(?:"((?:[^"\\]|\\.)*)"|(\d+))\)')
 _VIA_UUID_RE = re.compile(r'\(uuid\s+"([^"]+)"\)')
-_VIA_FREE_RE = re.compile(r'\(free\s+yes\)')
+# KiCad 8+ writes `(free yes)`; KiCad 6/7 wrote a bare `(free)` (#2067).
+_VIA_FREE_RE = re.compile(r'\(free(?:\s+yes)?\s*\)')
 # KiCad's via type is a bare word of the via block (`(via micro (at ...`,
 # `(via buried ...`); a block with none is a THROUGH via. KiCad 9 writes
 # `blind` for its BLIND_BURIED type; KiCad 10 also writes `buried`.
@@ -8134,6 +8139,74 @@ def release_text_caches() -> None:
     _footprint_edge_points_by_ref_cached.cache_clear()
 
 
+# Content-keyed cache of whole-board parses. One route.py run parses its
+# input and output files again and again (batch_route, file_only_copper, every
+# _late_* sweep, the final regrade), mostly with no byte changed in between:
+# esp_prog parses 19 times for 7 distinct texts, a 10.8 MB board 48 times at
+# 2.5 s each. A hit costs a sha1 of the bytes plus one pickle.loads (0.03 s on
+# that board), and returns a FRESH object, because callers mutate PCBData
+# (art terminals, renumbered nets). The key is the path (PCBData records
+# source_path), the bytes' sha1 and the two layer arguments; the parse reads
+# nothing else. What the parse printed is recorded and said again on a hit.
+# KRT_PARSE_CACHE=0 turns it off.
+_PARSE_CACHE = collections.OrderedDict()
+_PARSE_CACHE_SIZE = 4
+
+
+def _parse_cache_key(filepath, guide_layer, keepout_layer):
+    if os.environ.get('KRT_PARSE_CACHE', '1') == '0':
+        return None
+    try:
+        with open(filepath, 'rb') as f:
+            digest = hashlib.sha1(f.read()).hexdigest()
+    except (OSError, TypeError):
+        return None
+    return (os.path.abspath(filepath), digest, guide_layer, keepout_layer)
+
+
+def clear_parse_cache() -> None:
+    """Forget every cached parse (tests that patch the parser's internals)."""
+    _PARSE_CACHE.clear()
+
+
+class _ParseOutputTee:
+    """Pass sys.stdout/sys.stderr writes through and record them, so a cache
+    hit says what the parse said.
+
+    The streams are process-wide, so only the parsing thread's writes are
+    recorded (another thread printing meanwhile -- a GUI's UI thread -- is not
+    the parse's output, and would otherwise be said again on every hit), and
+    a stream is put back only if it is still this tee's (a thread that
+    swapped it meanwhile keeps its own)."""
+
+    class _Stream:
+        def __init__(self, inner, err, said, owner):
+            self._inner, self._err, self._said = inner, err, said
+            self._owner = owner
+
+        def write(self, text):
+            if threading.get_ident() == self._owner:
+                self._said.append((self._err, text))
+            return self._inner.write(text)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    def __init__(self):
+        self.said = []
+        owner = threading.get_ident()
+        self._out, self._errs = sys.stdout, sys.stderr
+        self._tee_out = self._Stream(self._out, False, self.said, owner)
+        self._tee_err = self._Stream(self._errs, True, self.said, owner)
+        sys.stdout, sys.stderr = self._tee_out, self._tee_err
+
+    def close(self):
+        if sys.stdout is self._tee_out:
+            sys.stdout = self._out
+        if sys.stderr is self._tee_err:
+            sys.stderr = self._errs
+
+
 def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
                     keepout_layer: str = "User.2") -> PCBData:
     """
@@ -8148,15 +8221,37 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         PCBData object containing all parsed data
     """
     global _PARSE_MEMO
+    key = _parse_cache_key(filepath, guide_layer, keepout_layer)
+    if key is not None:
+        hit = _PARSE_CACHE.get(key)
+        if hit is not None:
+            _PARSE_CACHE.move_to_end(key)
+            blob, said = hit
+            for err, text in said:
+                (sys.stderr if err else sys.stdout).write(text)
+            return pickle.loads(blob)
     outer = _PARSE_MEMO is None
     if outer:
         _PARSE_MEMO = {'live': {}, 'masked_from': {}, 'ends': {}, 'shapes': {}}
+    tee = _ParseOutputTee() if key is not None else None
     try:
-        return _parse_kicad_pcb(filepath, guide_layer, keepout_layer)
+        pcb = _parse_kicad_pcb(filepath, guide_layer, keepout_layer)
     finally:
+        if tee is not None:
+            tee.close()
         if outer:
             _PARSE_MEMO = None
         release_text_caches()
+    if key is not None:
+        try:
+            blob = pickle.dumps(pcb, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception:
+            blob = None
+        if blob is not None:
+            _PARSE_CACHE[key] = (blob, tuple(tee.said))
+            while len(_PARSE_CACHE) > _PARSE_CACHE_SIZE:
+                _PARSE_CACHE.popitem(last=False)
+    return pcb
 
 
 def _parse_kicad_pcb(filepath: str, guide_layer: str,
@@ -8340,7 +8435,10 @@ def propagate_via_cluster_nets(content: str, vias, segments, footprints, zones,
         if getattr(v, 'free', False):
             continue        # `(free yes)`: KiCad never re-nets a free via
         layers = span(v)
-        r = v.size / 2.0
+        # A track end ON the rim joins the via: pcbnew compares integer nm
+        # (300000 <= 300000), where float puts (39.6 - 39.3)**2 a few ulps
+        # over 0.3**2. 1 nm of slack restores that, and no more.
+        r = v.size / 2.0 + 1e-6
         own = any(s.net_id == v.net_id and s.layer in layers
                   and (ex - v.x) ** 2 + (ey - v.y) ** 2 <= r * r
                   for ex, ey, s in near(ends, v.x, v.y, r)) if v.net_id else False
@@ -8389,7 +8487,7 @@ def propagate_via_cluster_nets(content: str, vias, segments, footprints, zones,
                          for ring in fills.get((z.uuid, z.layer), ()))}
         if not origin:
             continue
-        r = v.size / 2.0
+        r = v.size / 2.0 + 1e-6     # rim ends join, as above
         origin |= {s.net_id for ex, ey, s in near(ends, v.x, v.y, r)
                    if s.net_id and s.layer in layers
                    and (ex - v.x) ** 2 + (ey - v.y) ** 2 <= r * r}
@@ -8934,6 +9032,8 @@ def pcbnew_track_copper(board, to_mm=None, get_layer_name=None, owners=None):
                 uuid=_item_uuid(track),
                 locked=bool(track.IsLocked()),
                 via_type=pcbnew_via_type(track),
+                # Parity with the text parser's `(free yes)` (#2067).
+                free=bool(getattr(track, 'GetIsFree', lambda: False)()),
             )
             vias.append(v)
             if owners is not None:

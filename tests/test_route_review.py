@@ -10,7 +10,11 @@ On tracked boards (a few seconds, no corpus):
   3. on esp_prog's human placement no two-pad part is turned against its
      wiring, and one with its pads swapped is, with a `swap_pose` that puts
      each pad where the other was (#1322);
-  4. a congested area names the nets through it.
+  4. a congested area names the nets through it;
+  5. a teardrop zone does not make its net poured (#2023): an open net
+     with a teardrop on its pad stays an open signal net, and a net with vias
+     stays among the costly nets; the same zone without the teardrop flag
+     is the control.
 """
 import os
 import sys
@@ -18,7 +22,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for d in ('py_tools', 'py_router', 'py_placer'):
     sys.path.insert(0, os.path.join(ROOT, d))
-from kicad_parser import parse_kicad_pcb  # noqa: E402
+from kicad_parser import Zone, parse_kicad_pcb  # noqa: E402
 import route_review  # noqa: E402
 
 ROUTED = os.path.join(ROOT, 'kicad_files', 'routed_output.kicad_pcb')
@@ -118,10 +122,38 @@ def test_a_congested_area_names_its_parts():
         ok("the area's box is ordered", a['box'][0] < a['box'][2] and a['box'][1] < a['box'][3])
 
 
+def test_a_teardrop_is_not_a_pour():
+    r0 = route_review.review(ROUTED)
+    shut = next(o['net'] for o in r0['open_nets'] if o['copper'])
+    costly = r0['most_vias'][0]['net']
+    pcb = parse_kicad_pcb(ROUTED)
+    ids = {n.name: i for i, n in pcb.nets.items()}
+    zones = list(pcb.zones or ())
+
+    def at_first_pad(net, teardrop):
+        nid = ids[net]
+        p = pcb.pads_by_net[nid][0]
+        x, y = p.global_x, p.global_y
+        return Zone(nid, net, 'F.Cu',
+                    [(x, y), (x + 1.0, y + 0.3), (x + 1.0, y - 0.3)], teardrop=teardrop)
+
+    for teardrop in (True, False):
+        pcb.zones = zones + [at_first_pad(shut, teardrop), at_first_pad(costly, teardrop)]
+        r = route_review.review(ROUTED, pcb=pcb)
+        hit = [o for o in r['open_nets'] if o['net'] == shut]
+        kind = 'a teardrop' if teardrop else 'control: an ordinary zone'
+        ok(f"{kind} on open {shut}: poured {not teardrop}",
+           bool(hit) and hit[0]['poured'] is not teardrop, str(hit))
+        ok(f"{kind} on {costly}: among the costly nets {teardrop}",
+           any(n['net'] == costly for n in r['most_vias']) is teardrop,
+           str([n['net'] for n in r['most_vias']]))
+
+
 def main():
     print("route_review: what to move after a route")
     for fn in (test_runs_and_writes_its_keys, test_a_cut_track_is_an_open_net,
-               test_a_swapped_part_is_turned, test_a_congested_area_names_its_parts):
+               test_a_swapped_part_is_turned, test_a_congested_area_names_its_parts,
+               test_a_teardrop_is_not_a_pour):
         print(f"--- {fn.__name__}")
         fn()
     print(f"\n{sum(results)}/{len(results)} checks passed")

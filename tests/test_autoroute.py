@@ -487,8 +487,12 @@ def test_run():
         expect(toks and toks[0] == 'AUTOROUTE_PLAN' and toks[-1] == 'AUTOROUTE_SUMMARY',
                f"the plan comes first and the summary last ({toks[:2]} ... {toks[-1:]})")
         plan = ev[0][1]
-        expect([s['tag'] for s in plan['steps']] == ['planes', 'route', 'route_p2', 'route_p3'],
-               f"the plan lists planes, route and the optional passes ({plan['steps']})")
+        # the board declares no class: the standard tier, then the floor (#2021)
+        expect([s['tag'] for s in plan['steps']]
+               == ['planes', 'route', 'route_p2', 'route_p3',
+                   'route_floor', 'route_floor_p2', 'route_floor_p3'],
+               f"the plan lists planes, route, the optional passes and the floor "
+               f"rung's ({plan['steps']})")
         expect(plan['rules']['clearance'] > 0 and plan['rules_why'],
                "the plan carries the design rules and where they came from")
         steps = [p for tok, p in ev if tok == 'AUTOROUTE_STEP']

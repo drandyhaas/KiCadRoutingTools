@@ -65,22 +65,6 @@
   },
   {
     "set": "set1monster",
-    "repo": "greatscottgadgets/hackrf-pro",
-    "path": "praline.kicad_pcb",
-    "file": "gsg__hackrf_pro.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/greatscottgadgets/hackrf-pro/main/praline.kicad_pcb",
-    "github_url": "https://github.com/greatscottgadgets/hackrf-pro/blob/main/praline.kicad_pcb",
-    "size_kb": 7843,
-    "layers_est": 6,
-    "footprints": 581,
-    "routable_nets": 430,
-    "tier": "hard",
-    "packages": "BGA/SoC,high-speed,high-layer",
-    "short_name": "hackrf_pro",
-    "note": "HackRF Pro SDR (praline), 6-layer, 581 fp"
-  },
-  {
-    "set": "set1monster",
     "repo": "antmicro/artix-dc-scm",
     "path": "artix-dc-scm.kicad_pcb",
     "file": "antmicro__artix_dc_scm.kicad_pcb",

@@ -27,6 +27,10 @@ for _d in ('py_router', 'py_placer', 'py_tools'):
 import kicad_parser as K  # noqa: E402
 import kicad_writer  # noqa: E402
 
+# This test counts what one real parse scans; a whole-board cache hit scans
+# nothing, so every parse here must be a real one.
+os.environ['KRT_PARSE_CACHE'] = '0'
+
 BOARD = os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb')
 FAILS = []
 MEMOS = (K._mask_pad_primitives, K._footprint_blocks_by_key_cached,

@@ -109,8 +109,9 @@ VIA_SIZE_KINDS = ('annular_width', 'via_diameter', 'hole_size')
 #: term binds them: a via's size (#1805), a track's width and the clearance
 #: of tracks, vias and pads (#1832). The router reads none of them.
 COURTYARD_GRADED_KINDS = VIA_SIZE_KINDS + ('track_width', 'clearance')
-#: #1843: the kinds a rule scoped by a rule area is graded for, by position
-AREA_GRADED_KINDS = ('clearance', 'track_width')
+#: #1843: the kinds a rule scoped by a rule area is graded for, by position;
+#: `hole_clearance` by check_drc's copper-to-hole grade (`HoleRuleBinder`)
+AREA_GRADED_KINDS = ('clearance', 'track_width', 'hole_clearance')
 # The kinds a rule may carry without being reported as "parsed, not
 # consumed". WIDER than what is read today: the resolver's callers ask only
 # for track_width / via_diameter / hole_size (draw_size, floor), copper
@@ -327,6 +328,11 @@ class RuleItem:
     # not measured: a rule's `area_scoped_condition` is then not read for it.
     area_layers: Optional[FrozenSet[Tuple[str, str]]] = None
     area_enclosed: Optional[FrozenSet[Tuple[str, str]]] = None
+    # the (area name, copper layer) pairs within reach of a measured item's
+    # copper: where copper laid beside it may stand in an area, for the
+    # router's reading of an area-scoped hole_clearance rule
+    # (`hole_rule_routing.RoutedHoleRules`). None = not measured.
+    area_near: Optional[FrozenSet[Tuple[str, str]]] = None
     # #1805: the courtyards the item's copper overlaps, as (reference, library
     # id, 'front' | 'back' of that part), for a rule's `courtyard_condition`
     # (`CourtyardIndex`). None = not measured: a courtyard term then reads as
@@ -355,11 +361,12 @@ class Rule:
     # (check_drc's vias, and #1832 its tracks and pads) is resolved against
     # it, by position. No routing step measures one, so none reads the rule.
     courtyard_condition: object = None
-    # #1843: a clearance / track_width rule's condition parsed WITH its
-    # rule-area predicates (parse_condition(areas=True)) when they are all it
-    # does not read. `unsupported` stays set: only an item measured against
-    # the board's rule areas (`DesignRules.area_index`) is resolved against
-    # it, by position. No routing step measures one, so none reads the rule.
+    # #1843: a clearance / track_width / hole_clearance rule's condition
+    # parsed WITH its rule-area predicates (parse_condition(areas=True)) when
+    # they are all it does not read. `unsupported` stays set: only an item
+    # measured against the board's rule areas (`DesignRules.area_index`) is
+    # resolved against it, by position (`area_clearance` for the first two,
+    # `check_drc.HoleRuleBinder` / `hole_rule_routing` for the third).
     area_scoped_condition: object = None
     # set by net_keepouts.derive_area_keepouts when the router honours the
     # rule as a net-filtered keep-out: what it honours, for the report
@@ -562,13 +569,17 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
         rule.unconsumed_kinds = sorted(k for k in rule.constraints
                                        if k not in CONSUMED_KINDS)
         if 'clearance' in rule.constraints and rule.unsupported is None:
-            # evaluable, and check_drc reads it for the violations it may make
-            # legal, but no obstacle stamp prices one pad or one part
+            # evaluable, but no obstacle stamp prices one pad or one part: a
+            # rule naming a part is read as keep-outs round its pads by the
+            # route steps (#2071, net_keepouts.derive_part_clearance_keepouts,
+            # which clears this), one naming only a pad number is not
             term = _reads_one_part(rule.condition)
             if term:
-                rule.router_unhonoured = (f"clearance scoped by {term}: routing "
-                                          f"prices a net and a pad type, never one "
-                                          f"pad or one part")
+                rule.router_unhonoured = (f"clearance scoped by {term}: routing keeps "
+                                          f"a net off one part's pads (a B.Reference "
+                                          f"== 'X' or B.memberOfFootprint('X') term "
+                                          f"ANDed in), never off one pad number "
+                                          f"across parts")
         if 'disallow' in rule.constraints and rule.unsupported is None:
             # #1527: evaluable, so nothing of it is "consumed" until a step
             # honours it -- it used to pass silently as consumed
@@ -608,7 +619,9 @@ def _via_attr(v, key):
 #   term   := ITEM '.' NAME '(' args ')' | ITEM '.' NAME | STRING | NUMBER | 'L'
 # Supported properties: NetClass, NetName, Net, Type, Layer, Pad_Type, Via_Type,
 #   Pad_Number (#1660: a string compared as a NetName is, so '1' is not '01' and
-#   a plain number is not a pad number -- `kicad_condition_refusal`)
+#   a plain number is not a pad number -- `kicad_condition_refusal`),
+#   Reference (#2071: a pad's part, compared as a NetName is, undefined on a
+#   track or via -- what memberOfFootprint() reads, spelled as a property)
 # Supported functions: hasNetclass, hasExactNetclass, existsOnLayer (a wildcard is
 #   a layer pattern), isMicroVia,
 #   isBlindBuriedVia, isPlated, memberOfFootprint, memberOfGroup,
@@ -637,7 +650,7 @@ _TOKEN = re.compile(r"""
     )""", re.VERBOSE)
 
 _SUPPORTED_PROPS = {'netclass', 'netname', 'net', 'type', 'layer', 'pad_type',
-                    'via_type', 'pad_number'}
+                    'via_type', 'pad_number', 'reference'}
 _SUPPORTED_FUNCS = {'hasnetclass', 'hasexactnetclass', 'onlayer', 'existsonlayer',
                     'ismicrovia', 'isblindburiedvia', 'isplated',
                     'memberoffootprint', 'memberofgroup', 'indiffpair'}
@@ -692,12 +705,94 @@ def _reads_one_part(node) -> Optional[str]:
     if not isinstance(node, tuple) or not node:
         return None
     if node[0] == 'prop':
-        return f'{node[1]}.Pad_Number' if node[2] == 'pad_number' else None
+        return ({'pad_number': f'{node[1]}.Pad_Number',
+                 'reference': f'{node[1]}.Reference'}.get(node[2]))
     if node[0] == 'call':
         return f'{node[1]}.memberOfFootprint()' if node[2] == 'memberoffootprint' else None
     if node[0] in ('cmp', 'and', 'or', 'not'):
         return next(filter(None, map(_reads_one_part, node[1:])), None)
     return None
+
+
+def _part_term(node) -> Optional[str]:
+    """The part pattern a condition term names, when the term holds only on
+    an item of that part: `X.memberOfFootprint('P')` or `X.Reference == 'P'`
+    (either way round). None for anything else (`!=` binds every OTHER part)."""
+    if not isinstance(node, tuple) or not node:
+        return None
+    if node[0] == 'call' and node[2] == 'memberoffootprint' and len(node[3]) == 1:
+        return node[3][0]
+    if node[0] == 'cmp' and node[1] == '==':
+        for p, q in ((node[2], node[3]), (node[3], node[2])):
+            if p[0] == 'prop' and p[2] == 'reference' and q[0] == 'lit':
+                return q[1]
+    return None
+
+
+def _part_patterns(node, out: set) -> set:
+    """Every part pattern the confining part terms of an AST name."""
+    if isinstance(node, tuple) and node:
+        pat = _part_term(node)
+        if pat is not None:
+            out.add(pat)
+        else:
+            for x in node[1:]:
+                _part_patterns(x, out)
+    return out
+
+
+def _part_confines(node) -> bool:
+    """The condition is false wherever every part term (`_part_term`) is
+    false: the rule binds only the items of the parts it names. A term under
+    a `!`, or beside an `||` another term can satisfy, does not confine it
+    (`_courtyard_confines`, for the part terms)."""
+    def false_without(n):
+        if not isinstance(n, tuple) or not n:
+            return False
+        if _part_term(n) is not None:
+            return True
+        if n[0] == 'and':
+            return any(false_without(c) for c in n[1:])
+        if n[0] == 'or':
+            return all(false_without(c) for c in n[1:])
+        if n[0] == 'not':
+            return true_without(n[1])
+        return False
+
+    def true_without(n):
+        if not isinstance(n, tuple) or not n:
+            return False
+        if n[0] == 'and':
+            return all(true_without(c) for c in n[1:])
+        if n[0] == 'or':
+            return any(true_without(c) for c in n[1:])
+        if n[0] == 'not':
+            return false_without(n[1])
+        return False
+    return false_without(node)
+
+
+def _reads_part(node) -> bool:
+    """Does a parsed condition read which part an item belongs to:
+    `X.Reference` or `X.memberOfFootprint()` anywhere in it?"""
+    if not isinstance(node, tuple) or not node:
+        return False
+    if node[0] == 'prop':
+        return node[2] == 'reference'
+    if node[0] == 'call':
+        return node[2] == 'memberoffootprint'
+    return any(_reads_part(c) for c in node[1:])
+
+
+def part_scoped_clearance_rule(rule) -> bool:
+    """#2071: a clearance rule the resolver reads whose condition names a part
+    (`B.Reference == 'C12'`, `B.memberOfFootprint('C12')`). No clearance
+    channel prices one part, so check_drc resolves each pair it may bind
+    pair-exact, and the route steps keep the nets it binds off the part's
+    pads (`net_keepouts.derive_part_clearance_keepouts`)."""
+    return (rule.unsupported is None and rule.condition is not None
+            and (rule.constraints.get('clearance') or {}).get('min') is not None
+            and _reads_part(rule.condition))
 
 
 #: Every function KiCad's condition compiler knows, with the arguments it will
@@ -1482,9 +1577,9 @@ def _cmp_strings(lhs_node, lv: str, rv: str, rhs_node=None) -> bool:
         # on the RIGHT is a wildcard ('A*' == A.Pad_Number does not bind A1).
         return netname_matches(lv, rv, wildcard=rhs_node is not None
                                and rhs_node[0] == 'lit')
-    if prop in ('type', 'pad_type', 'via_type', 'netname') or (
+    if prop in ('type', 'pad_type', 'via_type', 'netname', 'reference') or (
             rhs_node is not None and rhs_node[0] == 'prop'
-            and rhs_node[2] in ('type', 'pad_type', 'via_type')):
+            and rhs_node[2] in ('type', 'pad_type', 'via_type', 'reference')):
         # KiCad's string compare, as for a net name: case-insensitive, and a
         # literal on the right a wildcard ('T*' binds a through-hole pad)
         return netname_matches(lv, rv, wildcard=rhs_node is not None
@@ -1567,6 +1662,12 @@ def _value(node, a, b, layer, ctx=None):
         if name == 'pad_number':
             return (it.pad_number if it.type == 'pad' and it.pad_number is not None
                     else _UNDEFINED)
+        if name == 'reference':
+            # #2071: a pad reads its part's reference, measured on kicad-cli
+            # 10.0.6 (tests/oracle/constraint_agreement.py, part_* rows): a
+            # track or via has none, so `B.Reference != 'U2'` binds no track
+            return (it.footprint_ref if it.type in ('pad', 'footprint')
+                    and it.footprint_ref is not None else _UNDEFINED)
     if op == 'call':
         return _call(node, a, b, layer, ctx)
     raise Unsupported(f"value of {op}")
@@ -2451,13 +2552,15 @@ class DesignRules:
         for the same board (and the same rule areas), it returns the index
         it holds and keeps the resolved items it has cached."""
         board = getattr(pcb_data, 'board_info', None)
-        sig = (id(pcb_data), id(getattr(board, 'keepouts', None)),
-               len(getattr(board, 'keepouts', None) or ()))
+        # keyed on the rule areas themselves, so a view of the same board
+        # (a generator's gate reads one) finds the index it built
+        kos = getattr(board, 'keepouts', None)
+        sig = (id(kos), len(kos or ()))
         held = getattr(self, '_area_index_of', None)
-        if held is not None and held[0] == sig and held[1] is pcb_data:
+        if held is not None and held[0] == sig and held[1] is kos:
             return self._area_index
         idx = AreaIndex(self, pcb_data)
-        self._area_index_of = (sig, pcb_data)
+        self._area_index_of = (sig, kos)
         self._area_index = idx if idx.names else None
         self._cache.clear()
         return self._area_index
@@ -2597,21 +2700,44 @@ class DesignRules:
             s = _via_holding_ring(s, d, ring)
         return s, d
 
-    def via_size_grade(self, vias, board_floors=None) -> List[dict]:
+    def grade_via_item(self, v, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
+        """#1972: the RuleItem a via grade resolves ``v`` (a Via or a fanout
+        engine's via dict) with. Given ``courtyards``, a via whose position is
+        known is read as itself (`via_item`), the courtyards its disc
+        overlaps measured, so a rule bound by a courtyard term grades it where
+        it stands, as check_drc does (#1805). Otherwise, and for a via with no
+        position, the via of its net (`item_for_net`), as before."""
+        net = int(_via_attr(v, 'net_id'))
+        if courtyards is None:
+            return self.item_for_net(net, 'via')
+        x, y = (v.get('x'), v.get('y')) if isinstance(v, dict) else (
+            getattr(v, 'x', None), getattr(v, 'y', None))
+        if x is None or y is None:
+            return self.item_for_net(net, 'via')
+        if isinstance(v, dict):
+            from types import SimpleNamespace
+            v = SimpleNamespace(x=x, y=y, size=_via_attr(v, 'size'), net_id=net,
+                                drill=_via_attr(v, 'drill'),
+                                via_type=v.get('via_type'), layers=v.get('layers'))
+        return self.via_item(v, courtyards)
+
+    def via_size_grade(self, vias, board_floors=None,
+                       courtyards: Optional['CourtyardIndex'] = None) -> List[dict]:
         """#1676: `annular_grade` for the two other kinds a rule sizes a via by:
         one row per `via_diameter` / `hole_size` rule that sets the minimum of
         at least one of ``vias``: ``{rule, kind, min, vias, below, smallest}``,
         ``min`` KiCad's value and ``smallest`` the smallest size it bound.
         ``board_floors`` as for `annular_grade` (#1775): a via no rule binds is
         graded against its `via_diameter` / `via_drill` under the rule name
-        `Board Setup <key>`, the row marked ``board_setup``."""
+        `Board Setup <key>`, the row marked ``board_setup``. ``courtyards`` as
+        for `annular_grade` (#1972)."""
         rows: Dict[Tuple[str, str], dict] = {}
         bf = board_floors or {}
         for v in vias or ():
             size, drill = _via_attr(v, 'size'), _via_attr(v, 'drill')
             if not size or not drill:
                 continue
-            item = self.item_for_net(int(_via_attr(v, 'net_id')), 'via')
+            item = self.grade_via_item(v, courtyards)
             for kind, have in (('via_diameter', size), ('hole_size', drill)):
                 c = self.resolve_for_copper(kind, item, None, None)
                 need = c.kicad_min if c.fab_bound else c.min
@@ -2632,7 +2758,8 @@ class DesignRules:
             row['smallest'] = round(row['smallest'], 4)
         return [rows[k] for k in sorted(rows)]
 
-    def annular_grade(self, vias, board_floors=None) -> List[dict]:
+    def annular_grade(self, vias, board_floors=None,
+                      courtyards: Optional['CourtyardIndex'] = None) -> List[dict]:
         """#1649: the vias of one step graded against each `annular_width`
         rule (`ROUTER_UNHONOURED_KINDS`) -- the
         answer the "NOT honoured" line, printed before the step, cannot give.
@@ -2647,15 +2774,19 @@ class DesignRules:
         minimums the run ships graded against (`board_setup_via_floors`):
         a via no rule binds is graded against its `annular` instead, under
         the rule name `Board Setup min_via_annular_width`, the row marked
-        ``board_setup``. None (the default) grades rules only."""
+        ``board_setup``. None (the default) grades rules only.
+
+        ``courtyards`` (#1972, `courtyard_index`): each via is graded where
+        it stands (`grade_via_item`), so a rule bound by a courtyard term
+        sets the ring of a via inside that courtyard and the Board Setup row
+        keeps the vias outside it."""
         rows: Dict[str, dict] = {}
         board_ring = (board_floors or {}).get('annular')
         for v in vias or ():
             size, drill = _via_attr(v, 'size'), _via_attr(v, 'drill')
             if not size or not drill:
                 continue
-            c = self.resolve('annular_width',
-                             self.item_for_net(int(_via_attr(v, 'net_id')), 'via'),
+            c = self.resolve('annular_width', self.grade_via_item(v, courtyards),
                              None, None)
             rule, setup = c.min_rule, False
             if rule is None:                # a class or the board minimum set it
@@ -2972,8 +3103,58 @@ def board_setup_via_grade(pcb_data, vias, board_path: Optional[str] = None,
             rules = DesignRules.from_project(pcb_data, board_path)
         except (OSError, ValueError):
             rules = DesignRules()
-    rows = rules.annular_grade(vias, floors) + rules.via_size_grade(vias, floors)
+    cy = grade_courtyards(rules, pcb_data, board_path)
+    rows = (rules.annular_grade(vias, floors, cy)
+            + rules.via_size_grade(vias, floors, cy))
     return [r for r in rows if r.get('board_setup') and r['below']]
+
+
+def grade_courtyards(rules, pcb_data, board_path: Optional[str] = None
+                     ) -> Optional['CourtyardIndex']:
+    """#1972: the `CourtyardIndex` a step's via grades read positions with
+    (`annular_grade` / `via_size_grade`), or None when no via rule binds by
+    courtyard (then nothing is measured, as before). Built once per board
+    and rules and held on ``rules``."""
+    path = board_path or getattr(rules, 'source', None) or getattr(
+        pcb_data, 'source_path', '') or ''
+    sig = (id(pcb_data), path)
+    held = getattr(rules, '_grade_courtyards', None)
+    if held is not None and held[0] == sig and held[1] is pcb_data:
+        return held[2]
+    try:
+        idx = rules.courtyard_index(pcb_data, path or None)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"  (courtyard-scoped via rules not read by position: {e})")
+        idx = None
+    rules._grade_courtyards = (sig, pcb_data, idx)
+    return idx
+
+
+def via_rule_held_test(pcb_data, board_path: Optional[str] = None):
+    """#1972: ``held(via, kind)`` -- does a `.kicad_dru` rule set the minimum
+    KiCad grades ``via``'s ``kind`` (`VIA_SIZE_KINDS`) at? Read as check_drc
+    reads it: the via as itself (`via_item`), with the courtyards its disc
+    overlaps measured when a rule binds by courtyard (#1805). KiCad then
+    grades that kind of the via at the rule and not at the Board Setup
+    minimum (kicad-cli 10.0.6: 0.30/0.15 vias inside a courtyard a rule
+    relaxes to ring 0.07 / diameter 0.25 / hole 0.1 are clean under Board
+    Setup 0.13 / 0.35 / 0.2, and flagged without the rule), so its size says
+    nothing about that minimum. ``via`` is a Via or anything with ``x``,
+    ``y``, ``size``, ``drill``, ``net_id``. None when the board has no rules
+    file that sizes a via. Raises when the rules cannot be read."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    dru = os.path.splitext(path)[0] + '.kicad_dru' if path else ''
+    if not dru or not os.path.isfile(dru):
+        return None
+    dr = DesignRules.from_project(pcb_data, path)
+    if not any(set(r.constraints) & set(VIA_SIZE_KINDS) for r in dr.rules):
+        return None
+    cy = dr.courtyard_index(pcb_data, path)
+
+    def held(via, kind: str) -> bool:
+        c = dr.resolve_for_copper(kind, dr.via_item(via, cy), None, None)
+        return c.min_rule is not None
+    return held
 
 
 def disclose_board_setup_vias(pcb_data, vias, board_path: Optional[str] = None,
@@ -3092,10 +3273,11 @@ def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = No
     vias = [v for r in results for v in (r.get('new_vias') or [])]
     segs = [s for r in results for s in (r.get('new_segments') or [])]
     out = {}
-    ag = rules.annular_grade(vias)
+    cy = grade_courtyards(rules, pcb_data, board_path or rules.source or None)
+    ag = rules.annular_grade(vias, courtyards=cy)
     if ag:
         out['annular_rules'] = ag
-    vg = rules.via_size_grade(vias)
+    vg = rules.via_size_grade(vias, courtyards=cy)
     if vg:
         out['via_rules'] = vg
     eg = edge_rule_grade(pcb_data, segs, vias, board_path or rules.source or None)
@@ -3904,6 +4086,14 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
         except Exception as e:                                 # noqa: BLE001
             rules.net_keepouts = []
             rules.notes.append(f"net-filtered keep-outs not derived ({e})")
+        try:
+            # #2071: a clearance rule bound to one part, as keep-outs round
+            # that part's pads
+            from net_keepouts import derive_part_clearance_keepouts
+            rules.net_keepouts = list(rules.net_keepouts) + derive_part_clearance_keepouts(
+                rules, pcb_data)
+        except Exception as e:                                 # noqa: BLE001
+            rules.notes.append(f"part-scoped clearance keep-outs not derived ({e})")
     try:
         config.rules = rules
     except Exception:                                          # noqa: BLE001
@@ -3920,12 +4110,13 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
         # #1843: and the clearance rules scoped by a rule area
         from area_clearance import mark_honoured
         mark_honoured(rules, pcb_data, config)
-        # #1116: no via in an edge connector's contact finger
+        # #1116: no via in an edge connector's contact finger, and #2022:
+        # no copper in its finger strip but a finger's own entry
         try:
-            from net_keepouts import derive_contact_fingers
-            rules.net_keepouts = list(rules.net_keepouts) + derive_contact_fingers(pcb_data)
+            from net_keepouts import derive_mating_keepouts
+            rules.net_keepouts = list(rules.net_keepouts) + derive_mating_keepouts(pcb_data)
         except Exception as e:                                 # noqa: BLE001
-            rules.notes.append(f"contact-finger via keep-outs not derived ({e})")
+            rules.notes.append(f"edge-connector keep-outs not derived ({e})")
     if net_keepouts and pcb_data is not None:
         # #1853: the hole_clearance rules the route steps read
         from hole_rule_routing import mark_honoured as _mark_holes

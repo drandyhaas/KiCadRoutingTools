@@ -120,19 +120,23 @@ class SpatialIndex:
         return (int(x // self.cell_size), int(y // self.cell_size))
 
     def add(self, x: float, y: float, layer: str, point_id: int, size: float):
-        gx, gy = self._cell(x, y)
-        self.grid[(gx, gy, layer)].append((x, y, point_id, size))
+        cs = self.cell_size
+        self.grid[(int(x // cs), int(y // cs), layer)].append((x, y, point_id, size))
 
     def query_nearby(self, x: float, y: float, layer: str, radius: float):
         """Return all points within radius on the same layer."""
-        gx, gy = self._cell(x, y)
+        cs = self.cell_size
+        gx, gy = int(x // cs), int(y // cs)
         # Check neighboring cells based on radius
-        cells_to_check = int(radius / self.cell_size) + 1
+        n = int(radius / cs) + 1
+        get = self.grid.get
         results = []
-        for dx in range(-cells_to_check, cells_to_check + 1):
-            for dy in range(-cells_to_check, cells_to_check + 1):
-                for pt in self.grid.get((gx + dx, gy + dy, layer), []):
-                    results.append(pt)
+        ext = results.extend
+        for cx in range(gx - n, gx + n + 1):
+            for cy in range(gy - n, gy + n + 1):
+                cell = get((cx, cy, layer))
+                if cell:
+                    ext(cell)
         return results
 
 
@@ -155,8 +159,20 @@ class SegmentIndex:
         return cells
 
     def add(self, seg, seg_start_id: int):
-        for gx, gy in self._cells_for_segment(seg):
-            self.grid[(gx, gy, seg.layer)].append((seg, seg_start_id))
+        # `_cells_for_segment`'s cells, in its order, without the list.
+        cs = self.cell_size
+        x1, y1, x2, y2 = seg.start_x, seg.start_y, seg.end_x, seg.end_y
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+        gy1, gy2 = int(y1 // cs), int(y2 // cs) + 1
+        layer = seg.layer
+        grid = self.grid
+        item = (seg, seg_start_id)
+        for gx in range(int(x1 // cs), int(x2 // cs) + 1):
+            for gy in range(gy1, gy2):
+                grid[(gx, gy, layer)].append(item)
 
     def query_at(self, x: float, y: float, layer: str):
         """Return all segments that might contain point (x, y) on layer."""
@@ -174,13 +190,20 @@ class SegmentIndex:
         if radius is not None and radius > self.cell_size:
             r = int(radius // self.cell_size) + 1
         seen = set()
+        add = seen.add
         out = []
-        for dx in range(-r, r + 1):
-            for dy in range(-r, r + 1):
-                for item in self.grid.get((gx + dx, gy + dy, layer), ()):
-                    if id(item[0]) not in seen:
-                        seen.add(id(item[0]))
-                        out.append(item)
+        app = out.append
+        get = self.grid.get
+        for cx in range(gx - r, gx + r + 1):
+            for cy in range(gy - r, gy + r + 1):
+                cell = get((cx, cy, layer))
+                if not cell:
+                    continue
+                for item in cell:
+                    k = id(item[0])
+                    if k not in seen:
+                        add(k)
+                        app(item)
         return out
 
 

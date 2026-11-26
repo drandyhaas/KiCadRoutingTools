@@ -1097,6 +1097,56 @@ def emitted_copper_clear(route_points, extra_conn, width, pcb_data, net_id,
     return True
 
 
+def rescue_copper_clear(segments, pcb_data, net_id, config, vias=()):
+    """True when a rescue-ladder result's segments, each at its own width,
+    clear foreign copper, the board edge, NPTH drills and keep-outs --
+    `wide_route_clear`, the measurement `emitted_copper_clear` makes for the
+    main link path (#2004).
+
+    The weld escalation and the exact-fill strap commit a rescue result
+    directly, and the rescue's fine-grid A* judges clearance on its grid
+    map: an off-grid foreign track is rounded there, and an exact-fill
+    endpoint seeds a cell beside the fill's edge, so the copper as written
+    could graze what the map said was clear (zynq_ad9364: a 0.0889 GND strap
+    14 um inside clearance of an off-grid fanout track). Segments are graded
+    per width, one call each: a None-layer point between two segments
+    separates them, so no leg is invented between them.
+
+    Its `vias` are graded too (#2010), each against the board as KiCad
+    grades a barrel: foreign copper on every layer it spans, drill to drill
+    on any net and the board's hole rules (check_drc.new_copper_refusal),
+    filled footprint copper (filled_graphic_refusal) and the outline
+    (BoardEdgeGate). A rescue via's clearance was judged on the same grid
+    map as its tracks."""
+    from plane_region_connector import wide_route_clear
+    bec = getattr(config, 'board_edge_clearance', 0.0)
+    by_width = {}
+    for s in segments or ():
+        by_width.setdefault(s.width, []).append(s)
+    for width, segs in by_width.items():
+        pts = []
+        for s in segs:
+            if pts:
+                pts.append((s.start_x, s.start_y, None))
+            pts.append((s.start_x, s.start_y, s.layer))
+            pts.append((s.end_x, s.end_y, s.layer))
+        if not wide_route_clear(pts, width, pcb_data, net_id, config,
+                                board_edge_clearance=bec):
+            return False
+    vias = list(vias or ())
+    if vias:
+        from check_drc import (new_copper_refusal, filled_graphic_refusal,
+                               BoardEdgeGate)
+        if new_copper_refusal((), vias, pcb_data, config):
+            return False
+        if filled_graphic_refusal(pcb_data, vias, config.clearance):
+            return False
+        edge = BoardEdgeGate(pcb_data, bec or 0.0)
+        if edge and any(edge.via_refused(v.x, v.y, v.size) for v in vias):
+            return False
+    return True
+
+
 def _largest_track_component_points(pcb_data, net_id, max_pts: int = 40):
     """Sample points (x, y, layer) on the net's largest track+via copper
     component, graded WITHOUT any zone-fill credit. The biggest genuine
@@ -2216,15 +2266,19 @@ def oracle_reconnect(board_file: str, net_names, config,
         nonlocal _net_keepouts
         if _ncl_by_name:
             config.net_clearances = rekey_by_name(_ncl_by_name, pcb.nets)
-        from net_keepouts import attach, derive_area_keepouts, derive_layer_bans
+        from net_keepouts import (attach, derive_area_keepouts, derive_layer_bans,
+                                  derive_mating_keepouts, derive_part_clearance_keepouts)
         if _net_keepouts is None:
             # the rules source's net-filtered keep-outs name nets and
-            # polygons, so one derivation serves every parse
+            # polygons, so one derivation serves every parse; an edge
+            # connector's (#1116, #2022) are the board's own geometry
             try:
                 from design_rules import DesignRules
                 rules = DesignRules.from_project(pcb, _track_src)
                 _net_keepouts = (derive_area_keepouts(rules, pcb)
-                                 + derive_layer_bans(rules, pcb))
+                                 + derive_layer_bans(rules, pcb)
+                                 + derive_part_clearance_keepouts(rules, pcb)
+                                 + derive_mating_keepouts(pcb))
             except Exception as _ke:                        # noqa: BLE001
                 print(f"  KiCad-oracle recheck: net-filtered keep-outs not "
                       f"derived ({_ke})")
@@ -2903,6 +2957,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                         print(f"    {net_name}: exact-fill strap REJECTED "
                               f"({_ko2}, #1778)")
                         _esc2 = None
+                if _esc2 and not _esc2.get('failed') and not rescue_copper_clear(
+                        _esc2.get('new_segments'), pcb_data, net_id, _esc2_cfg,
+                        vias=_esc2.get('new_vias') or ()):
+                    print(f"    {net_name}: exact-fill strap REJECTED "
+                          f"(copper would violate clearance, #2004)")
+                    _esc2 = None
                 if _esc2 and not _esc2.get('failed'):
                     _e2segs = _esc2.get('new_segments') or []
                     _e2vias = _esc2.get('new_vias') or []
@@ -3252,6 +3312,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                     print(f"    {net_name}: weld escalation REJECTED "
                           f"(copper reaches neither/only one gap endpoint "
                           f"on its layer -- unrelated fragment join, #648)")
+                    _esc = None
+                if _esc and not _esc.get('failed') and not rescue_copper_clear(
+                        _esc.get('new_segments'), pcb_data, net_id, _esc_cfg,
+                        vias=_esc.get('new_vias') or ()):
+                    print(f"    {net_name}: weld escalation REJECTED "
+                          f"(copper would violate clearance, #2004)")
                     _esc = None
                 # #658: the rescue's scoped fine router has no layer-cost
                 # plumbing, so a FORBIDDEN layer (cost -1, e.g. power

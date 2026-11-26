@@ -14,6 +14,7 @@ import numpy as np
 
 from kicad_parser import PCBData, Pad, Segment
 from area_clearance import composed_builder as _area_composed_builder
+from area_clearance import composed as _area_composed
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import iter_pad_blocked_cells, pad_blocked_cells_array, \
     segment_blocked_cells_array, segment_blocked_spans
@@ -729,6 +730,88 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
                                     rotation_deg=pad.rect_rotation)
     if len(cells):
         obstacles.add_blocked_vias_batch(cells)
+
+
+class _ViaCellRecorder:
+    """Stands in for a via map and keeps the cells a stamp would block."""
+
+    def __init__(self):
+        self.chunks = []
+
+    def add_blocked_vias_batch(self, cells):
+        self.chunks.append(np.asarray(cells, dtype=np.int32).reshape(-1, 2))
+
+    def add_blocked_via(self, gx, gy):
+        self.chunks.append(np.array([[gx, gy]], dtype=np.int32))
+
+    def cells(self) -> np.ndarray:
+        if not self.chunks:
+            return np.empty((0, 2), dtype=np.int32)
+        return np.ascontiguousarray(np.concatenate(self.chunks), dtype=np.int32)
+
+
+@_area_composed
+def exposed_pad_array_window(obstacles: GridObstacleMap, pcb_data: PCBData,
+                             net_id: int, pad: Pad, config: GridRouteConfig,
+                             same_net_pad_clearance: float = -1.0,
+                             open_window: bool = True):
+    """Open (``open_window=True``) or close again a via map for the thermal
+    via array under `pad` (#2063).
+
+    The map is the one `build_via_obstacle_map(pcb_data, config, net_id,
+    same_net_pad_clearance=...)` built. Under an active same-net pad
+    clearance (#581) that map keeps every via off every same-net SMD pad,
+    the exposed pad included, so the array that is that pad's own via site
+    had no site at all. Opening LIFTS exactly that pad's #581 keep-out (the
+    stamp the builder made, through the same `_add_pad_via_obstacle`). Every
+    other pad's keep-out stays.
+
+    The array must still keep out of the pad's paste (#962). The map already
+    carries the net's paste openings except a pad's own opening that lies
+    inside the pad, which the pad keep-out was covering
+    (`paste_keepout_apertures`). Opening ADDS the keep-out of those openings
+    of `pad`, at the margin the paste keep-out uses everywhere (via/2 + the
+    clearance + grid/2). Closing reverses both, so the map ends as it was
+    built plus the vias the array placed. Composed over the area rules like
+    the builder, so the lift is the builder's stamp in each area.
+
+    Does nothing unless the clearance is active (> 0): -1 stamps no same-net
+    pad, and an explicit 0 keeps its legacy meaning unchanged.
+    """
+    snpc = same_net_pad_clearance
+    if snpc is None or snpc < 0:
+        _cfg = getattr(config, 'same_net_pad_clearance', -1.0)
+        snpc = _cfg if (_cfg is not None and _cfg > 0) else -1.0
+    if snpc <= 0 or getattr(pad, 'drill', 0):
+        return
+    coord = GridCoord(config.grid_step)
+    rec = _ViaCellRecorder()
+    _add_pad_via_obstacle(rec, pad, coord, config, clearance_override=snpc)
+    lift = rec.cells()
+    add = np.empty((0, 2), dtype=np.int32)
+    try:
+        from paste_apertures import apertures_for_net
+    except ImportError:
+        apertures_for_net = None
+    own = []
+    for ap in (apertures_for_net(pcb_data, net_id) if apertures_for_net else []):
+        sp = ap.shape_pad
+        if (ap.source != 'pad' or sp is None or max(ap.margin) > 0
+                or ap.owner_ref != (pad.component_ref or '')
+                or ap.pad_number != pad.pad_number
+                or abs(sp.global_x - pad.global_x) > 1e-6
+                or abs(sp.global_y - pad.global_y) > 1e-6):
+            continue
+        own.append(ap)
+    if own:
+        from obstacle_map import paste_aperture_keepout_cells
+        add = np.ascontiguousarray(paste_aperture_keepout_cells(
+            pcb_data, net_id, config, snpc, apertures=own), dtype=np.int32)
+    first, second = (lift, add) if open_window else (add, lift)
+    if len(first):
+        obstacles.remove_blocked_vias_batch(first)
+    if len(second):
+        obstacles.add_blocked_vias_batch(second)
 
 
 def _is_rectangular_outline(board_outline: List[Tuple[float, float]],

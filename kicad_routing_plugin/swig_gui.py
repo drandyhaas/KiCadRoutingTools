@@ -30,7 +30,6 @@ for _sib in ('py_placer', 'py_tools'):
         sys.path.append(_d)
 
 import routing_defaults as defaults
-from kicad_parser import POSITION_DECIMALS
 from kicad_parser import mm_to_iu
 from keep_away import split_keep_away_specs
 
@@ -1215,7 +1214,11 @@ class RoutingDialog(wx.Dialog):
                     "net classes as class=NAME. Applies to the Route and Differential "
                     "tabs. While a net "
                     "of one side routes, cells closer than GAP mm (edge to edge, same "
-                    "layer) to the other side's copper cost Keep-away Cost. Nets of "
+                    "layer) to the other side's copper -- pads, tracks, vias and "
+                    "pours (a pour's band from its zone outline) -- cost Keep-away "
+                    "Cost; AGGRESSOR:VICTIM:GAP:adjacent also prices the other side's "
+                    "copper on the copper layers next to the routed one, in plan "
+                    "view. Nets of "
                     "one side route against each other at the normal clearance. The "
                     "log reports per net the length left inside a band. Empty = off.")
                 grid.Add(self.keep_away, 0, wx.EXPAND)
@@ -4322,17 +4325,9 @@ class RoutingDialog(wx.Dialog):
         # stayed on the live board as a same-net drill pair.
         vias_to_remove = results_data.get('vias_to_remove') or []
         if vias_to_remove:
-            via_keys = {(round(v.x, POSITION_DECIMALS), round(v.y, POSITION_DECIMALS),
-                         v.net_id) for v in vias_to_remove}
-            for track in list(board.GetTracks()):
-                if track.Type() != pcbnew.PCB_VIA_T:
-                    continue
-                vk = (round(pcbnew.ToMM(track.GetPosition().x), POSITION_DECIMALS),
-                      round(pcbnew.ToMM(track.GetPosition().y), POSITION_DECIMALS),
-                      track.GetNetCode())
-                if vk in via_keys:
-                    board.RemoveNative(track)
-                    tracks_removed += 1
+            # Counted and lock-keyed, as remove_vias_from_content.
+            from .gui_utils import remove_listed_vias
+            tracks_removed += remove_listed_vias(board, pcbnew, vias_to_remove)
 
         # Add segments from routing results
         for result in results_data.get('results', []):
@@ -4747,8 +4742,10 @@ class RoutingDialog(wx.Dialog):
                            getattr(via, 'via_type', None))
         # Keep a re-placed via's own tenting/plugging/filling (#489 §8). A via
         # with no spec is left to inherit the board setting, as before.
-        from .gui_utils import apply_via_protection
+        from .gui_utils import apply_via_protection, apply_via_free
         apply_via_protection(pcb_via, getattr(via, 'tenting_attrs', None))
+        # A free via stays free, as the CLI writes it (#2067).
+        apply_via_free(pcb_via, getattr(via, 'free', False))
         board.Add(pcb_via)
 
     def _move_copper_text_to_silkscreen(self, board):

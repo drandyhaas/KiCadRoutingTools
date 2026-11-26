@@ -21,6 +21,11 @@ nets come from the resolver's own evaluator (NetName, NetClass, Type, layer
 predicates ...), separately for tracks and for vias; a rule it cannot model
 completely stays reported as NOT honoured rather than half-applied.
 
+A clearance rule bound to one part (#2071, `derive_part_clearance_keepouts`:
+`A.NetName == '/PH' && B.Reference == 'C12'`) is a region per pad of the part,
+the pad's copper outline with the rule's value as its `clearance`, which the
+rasteriser and `audit_items` both read as an edge-to-edge distance.
+
 An `edge_clearance` rule that binds some nets harder than others (#1678,
 `derive_edge_bands`) takes the same stamp: the board's static edge band is the
 lowest floor over the nets, and a net above it gets the rest while it routes.
@@ -238,6 +243,170 @@ def derive_area_keepouts(rules, pcb_data) -> List[dict]:
             what += "; enclosedByArea read as intersectsArea (keeps out more)"
         rule.honoured = what
     return regions
+
+
+def _pad_copper_rings(pad) -> List[List[Tuple[float, float]]]:
+    """The outline(s) of a pad's copper, as check_drc measures it
+    (`_pad_copper_core`: the core grown by its corner radius), with every arc
+    vertex pushed out so the ring circumscribes the copper."""
+    import math
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+    from check_drc import _pad_copper_core
+    polys, r = _pad_copper_core(pad)
+    parts = []
+    for poly in polys:
+        pts = list(dict.fromkeys((float(x), float(y)) for x, y in poly))
+        if len(pts) == 1:
+            parts.append(Point(pts[0]))
+        elif len(pts) == 2 or Polygon(pts).area <= 1e-12:
+            parts.append(LineString(pts))
+        else:
+            parts.append(Polygon(pts))
+    if not parts:
+        return []
+    geom = unary_union(parts)
+    q = 8
+    if r > 1e-9:
+        geom = geom.buffer(r / math.cos(math.pi / (4 * q)), quad_segs=q)
+    out = []
+    for g in getattr(geom, 'geoms', [geom]):
+        ext = getattr(g, 'exterior', None)
+        if ext is not None:
+            ring = [(float(x), float(y)) for x, y in ext.coords][:-1]
+            if len(ring) >= 3:
+                out.append(ring)
+    return out
+
+
+#: The `router_unhonoured` prefix parse_dru gives a clearance rule a part or
+#: pad term scopes (design_rules._reads_one_part).
+_ONE_PART_PREFIX = 'clearance scoped by '
+
+
+def derive_part_clearance_keepouts(rules, pcb_data) -> List[dict]:
+    """#2071: the keep-outs a clearance rule bound to one PART defines --
+    `(rule "x" (constraint clearance (min 3mm)) (condition "A.NetName ==
+    '/PH' && B.Reference == 'C12'"))`, or `B.memberOfFootprint('C12')`. The
+    obstacle map prices a net against a pad type, never against one part, so
+    such a rule becomes one region per pad of the part, on the pad's copper
+    layers: the pad's copper outline with the rule's value as the region's
+    `clearance` (the rasteriser keeps a track's EDGE that far from it, as
+    KiCad measures a clearance), bound to the nets the rule holds there and
+    stamped only while one of them routes, like every net-filtered keep-out.
+
+    Which nets, layers and items a pad's region binds comes from the
+    resolver itself (`DesignRules.resolve`: commutative, last match wins,
+    the rule REPLACING the class value), per net, copper layer and item kind
+    (a track, a through via): a pad gets a region where THIS rule is the one
+    the resolver lands on and its value is above the class pair's, which the
+    router already keeps. A rule the resolver cannot land on a part's pads
+    alone -- a part term under `!`, beside an `||`, `Reference != 'X'` --
+    keeps its NOT honoured line. Sets `rule.honoured` on each rule read."""
+    from design_rules import (_footprint_named, _part_confines, _part_patterns,
+                              _reads_one_part, _rule_matches, netname_matches)
+    from net_queries import expand_pad_layers
+    from paste_apertures import pad_has_copper
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None)
+                  or rules.copper_layers or [])
+    nets = {nid: n.name for nid, n in pcb_data.nets.items() if nid and n.name}
+    out: List[dict] = []
+    names_ctx = None
+    # whether any clearance rule the resolver reads can answer differently by
+    # layer: when none can, a pair is resolved once for all its pad's layers
+    layered = any(r.layer_clause is not None or _layer_dependent(r.condition)
+                  for r in rules.rules
+                  if 'clearance' in r.constraints and not r.unsupported)
+    for rule in rules.rules:
+        spec = rule.constraints.get('clearance') or {}
+        if (rule.unsupported or rule.condition is None or spec.get('min') is None
+                or not str(rule.router_unhonoured or '').startswith(_ONE_PART_PREFIX)):
+            continue
+        term = _reads_one_part(rule.condition) or ''
+        if term.endswith('.Pad_Number') and not _part_patterns(rule.condition, set()):
+            continue                  # one pad number across every part
+        if not _part_confines(rule.condition):
+            rule.router_unhonoured = (
+                f"{_ONE_PART_PREFIX}{term}: routed to only where the condition holds "
+                f"on the named parts' pads alone (B.Reference == 'X' or "
+                f"B.memberOfFootprint('X') ANDed in, not negated or OR'ed)")
+            continue
+        pats = _part_patterns(rule.condition, set())
+        if names_ctx is None:
+            names_ctx = ('clearance', frozenset(nets.values()))
+        lay_dep = rule.layer_clause is not None or _layer_dependent(rule.condition)
+        refs: set = set()
+        n_pads = 0
+        bound_nets: set = set()
+        for key, fp in sorted((getattr(pcb_data, 'footprints', None) or {}).items()):
+            ref, lib = rules.footprint_ids.get(key, (key, None))
+            if not any(_footprint_named(p, ref, lib) or netname_matches(ref or '', p)
+                       for p in pats):
+                continue
+            for pad in fp.pads:
+                if not pad_has_copper(pad) or pad.size_x <= 0 or pad.size_y <= 0:
+                    continue
+                layers = [l for l in expand_pad_layers(list(pad.layers or ()), copper)
+                          if l in copper]
+                if not layers:
+                    continue
+                pit = rules.item_for_pad(pad)
+                # (kinds, value) -> net name -> layers
+                hits: Dict[Tuple[str, float], Dict[str, set]] = {}
+                for nid, net in nets.items():
+                    if nid == pad.net_id:
+                        continue           # a clearance binds two nets
+                    for kind in ('track', 'via'):
+                        facts = {'via_type': 'through'} if kind == 'via' else {}
+                        probe = layers if lay_dep else layers[:1]
+                        if not any(_rule_matches(rule, rules.item_for_net(nid, kind, l, **facts),
+                                                 pit, l, copper, names_ctx) for l in probe):
+                            continue
+                        base = max([v for v in (rules.class_value(nid, 'clearance'),
+                                                rules.class_value(pad.net_id, 'clearance'))
+                                    if v is not None] or [0.0])
+                        for l in (layers if layered else layers[:1]):
+                            it = rules.item_for_net(nid, kind, l, **facts)
+                            c = rules.resolve('clearance', it, pit, l)
+                            if (c.min_rule != rule.name or c.min is None
+                                    or c.min <= base + 1e-9):
+                                continue
+                            hits.setdefault((kind, round(float(c.min), 6)), {}).setdefault(
+                                net, set()).update([l] if layered else layers)
+                if not hits:
+                    continue
+                groups: Dict[Tuple[float, FrozenSet[str], FrozenSet[str]], set] = {}
+                for (kind, value), by_net in hits.items():
+                    by_layers: Dict[FrozenSet[str], set] = {}
+                    for net, lays in by_net.items():
+                        by_layers.setdefault(frozenset(lays), set()).add(net)
+                    for lays, nset in by_layers.items():
+                        groups.setdefault((value, frozenset(nset), lays), set()).add(kind)
+                rings = _pad_copper_rings(pad)
+                if not rings:
+                    continue
+                n_pads += 1
+                refs.add(ref or key)
+                for (value, nset, lays), ks in sorted(
+                        groups.items(), key=lambda g: (g[0][0], sorted(g[0][1]), sorted(g[0][2]))):
+                    bound_nets |= nset
+                    for ring in rings:
+                        out.append({
+                            'name': f"{rule.name} ({ref or key}.{pad.pad_number})",
+                            'rule': rule.name, 'polygon': ring, 'holes': [],
+                            'layers': set(lays), 'clearance': value,
+                            'part_clearance': True,
+                            'tracks_allowed': 'track' not in ks,
+                            'vias_allowed': 'via' not in ks, 'nets': nset})
+        rule.router_unhonoured = None
+        if n_pads:
+            rule.honoured = (f"honoured as a part keep-out: {len(bound_nets)} net(s) kept "
+                             f"{spec['min']:g} mm (copper edge to pad edge) from {n_pads} "
+                             f"pad(s) of {', '.join(sorted(refs))}")
+        else:
+            rule.honoured = ("read as a part keep-out: it binds no pad of this board "
+                             "above its class clearance, so it keeps nothing out")
+    return out
 
 
 def derive_layer_bans(rules, pcb_data) -> List[dict]:
@@ -462,6 +631,194 @@ def derive_contact_fingers(pcb_data) -> List[dict]:
     return out
 
 
+def _strip_footprints(pcb_data):
+    """[(ref, footprint)] of the mating-contact footprints whose pads are
+    strips and whose copper stays on the board: a plug or card-edge fingers
+    (the parts `derive_contact_fingers` reads, before its at-the-outline
+    test). `derive_finger_bands` judges the edge itself."""
+    import _placer_path  # noqa: F401  (placement lives in py_placer/)
+    from placement.floorplan import is_board_copper_plug, _copper_pads
+    from placement.legality import BoardOutlineGate, pad_copper_overrun_mm, EPS
+    from placement.part_class import is_card_fingers
+    out, gate = [], None
+    for ref, fp in sorted((getattr(pcb_data, 'footprints', None) or {}).items()):
+        if not (is_board_copper_plug(fp) or is_card_fingers(fp)):
+            continue
+        if gate is None:
+            gate = BoardOutlineGate(pcb_data.board_info, 0.0)
+        if (_elongated_fingers(fp)
+                and pad_copper_overrun_mm(_copper_pads(fp), gate) <= EPS):
+            out.append((ref, fp))
+    return out
+
+
+#: How far a finger's outer end may stand from the outline and still face
+#: the edge: the stock PCIe edge footprints end their fingers 1.3 mm short of
+#: it (1.65 at a presence-detect finger), past MATING_FINGER_EDGE_MM.
+FINGER_EDGE_REACH = 2.0
+
+#: A gap between neighbouring fingers this many times the row's median gap
+#: (a keying notch, a split connector) ends a run: the band does not bridge it.
+FINGER_RUN_BREAK = 2.0
+
+
+def derive_finger_bands(pcb_data) -> List[dict]:
+    """The strip a mating edge connector's fingers occupy, from each finger's
+    inner end to the board edge, kept clear of copper the way human card-edge
+    designs keep it (#2022): the socket wipes the fingers and the edge past
+    them is bevelled, so copper between the fingers or past their outer ends
+    is ground off or shorted, and a via there is drilled through the contact
+    area. Per run of fingers on each of their copper layers:
+
+    * one region over the run, from the fingers' inner ends to past the edge,
+      that no net's via may enter (`finger_band` 'via');
+    * one column per finger, from its inner end to past the edge and across
+      to the midpoints with its neighbours, that no track of another net may
+      enter (`finger_band` 'column'): a track between two fingers, or along
+      the strip beside them, crosses some column not its own;
+    * and the finger's own strip past its outer end, which its own net may
+      not enter either (`finger_band` 'tail'): a finger is entered from its
+      inner end.
+
+    Regions carry clearance 0: they forbid copper overlap, the way KiCad
+    grades a rule area, and a finger's own net reaches its finger down the
+    middle of its column. [] when the board has no mating edge connector.
+    Fingers whose strips are not axis-aligned are left out."""
+    from check_drc import board_edge_geometry, _point_to_rings_distance
+    from paste_apertures import pad_has_copper
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    mating = _strip_footprints(pcb_data)
+    if not mating:
+        return []
+    rings, _o, _c = board_edge_geometry(pcb_data.board_info, rect_ring=True)
+    if not rings:
+        return []
+    names = frozenset(n.name for nid, n in pcb_data.nets.items() if nid and n.name)
+    out: List[dict] = []
+    for ref, fp in mating:
+        fingers = [p for p in fp.pads if pad_has_copper(p) and p.size_x > 0
+                   and p.size_y > 0 and abs(getattr(p, 'rect_rotation', 0.0) or 0.0) < 1e-6
+                   and max(p.size_x, p.size_y) >= FINGER_MIN_ASPECT * min(p.size_x, p.size_y)]
+        if len(fingers) < 2:
+            continue
+        # the strips' long axis is across the edge: v along it, u along the edge
+        vert = sum(1 for p in fingers if p.size_y > p.size_x) * 2 >= len(fingers)
+
+        def uv(p):
+            """(u0, u1, v0, v1): the pad's extent along / across the edge."""
+            hx, hy = p.size_x / 2.0, p.size_y / 2.0
+            if vert:
+                return (p.global_x - hx, p.global_x + hx, p.global_y - hy, p.global_y + hy)
+            return (p.global_y - hy, p.global_y + hy, p.global_x - hx, p.global_x + hx)
+
+        def xy(u, v):
+            return (u, v) if vert else (v, u)
+        # which end of the strips faces the edge: the one nearer the outline
+        near_hi = 0.0
+        for p in fingers:
+            u0, u1, v0, v1 = uv(p)
+            um = (u0 + u1) / 2.0
+            near_hi += (_point_to_rings_distance(*xy(um, v0), rings)
+                        - _point_to_rings_distance(*xy(um, v1), rings))
+        sign = 1.0 if near_hi >= 0 else -1.0       # +1: the edge is at larger v
+
+        def edge_gap(p):
+            """How far the finger's outer end stands from the outline."""
+            u0, u1, v0, v1 = uv(p)
+            return _point_to_rings_distance(*xy((u0 + u1) / 2.0,
+                                                v1 if sign > 0 else v0), rings)
+        def faces_edge(p):
+            """The finger's outer end stands at the outline, nearer it than
+            the finger's long sides do."""
+            u0, u1, v0, v1 = uv(p)
+            vm = (v0 + v1) / 2.0
+            side = min(_point_to_rings_distance(*xy(u0, vm), rings),
+                       _point_to_rings_distance(*xy(u1, vm), rings))
+            g = edge_gap(p)
+            return g <= FINGER_EDGE_REACH and g < side
+        # The row is the fingers whose outer ends face the edge, and every
+        # finger in line with them (a shorter presence-detect finger stops
+        # further from the edge). A footprint the plug test accepts can run
+        # its strips ALONG the board with one or two near an edge (an edge
+        # modelled on a backplane): none faces it, and it has no band.
+        anchors = [p for p in fingers if faces_edge(p)]
+        if len(anchors) < 2:
+            continue
+        a0 = min(uv(p)[2] for p in anchors)
+        a1 = max(uv(p)[3] for p in anchors)
+        fingers = [p for p in fingers if uv(p)[2] < a1 and uv(p)[3] > a0]
+        # past the edge by the farthest finger's distance to it, plus a margin
+        reach = max(edge_gap(p) for p in fingers) + 1.0
+        layers = sorted({l for p in fingers for l in p.layers if l in copper},
+                        key=copper.index)
+        for layer in layers:
+            row = sorted((p for p in fingers if layer in p.layers),
+                         key=lambda p: uv(p)[0])
+            if not row:
+                continue
+            gaps = [uv(b)[0] - uv(a)[1] for a, b in zip(row, row[1:])]
+            med = sorted(gaps)[len(gaps) // 2] if gaps else 0.0
+            runs, cur = [], [row[0]]
+            for p, g in zip(row[1:], gaps):
+                if med > 0 and g > FINGER_RUN_BREAK * med:
+                    runs.append(cur)
+                    cur = []
+                cur.append(p)
+            runs.append(cur)
+            for run in runs:
+                ext = [uv(p) for p in run]
+                lefts = [ext[0][0] - med / 2.0] + [
+                    (ext[i - 1][1] + ext[i][0]) / 2.0 for i in range(1, len(run))]
+                rights = lefts[1:] + [ext[-1][1] + med / 2.0]
+                # inner = the end away from the edge; edge = past the edge
+                inner = [(e[2] if sign > 0 else e[3]) for e in ext]
+                outer = [(e[3] if sign > 0 else e[2]) for e in ext]
+                edge = max(outer) + reach if sign > 0 else min(outer) - reach
+
+                def rect(u0, u1, va, vb):
+                    return [xy(u0, va), xy(u1, va), xy(u1, vb), xy(u0, vb)]
+                stair = []
+                for i in range(len(run)):
+                    stair += [xy(lefts[i], inner[i]), xy(rights[i], inner[i])]
+                stair += [xy(rights[-1], edge), xy(lefts[0], edge)]
+                out.append({'name': f"finger band {ref} {layer}", 'rule': None,
+                            'polygon': stair, 'holes': [], 'layers': set(copper),
+                            'tracks_allowed': True, 'vias_allowed': False,
+                            'nets': names, 'clearance': 0.0, 'finger_band': 'via',
+                            'ref': ref})
+                for i, p in enumerate(run):
+                    own = p.net_name if p.net_id else ''
+                    out.append({'name': f"finger band {ref}.{p.pad_number} {layer}",
+                                'rule': None,
+                                'polygon': rect(lefts[i], rights[i], inner[i], edge),
+                                'holes': [], 'layers': {layer},
+                                'tracks_allowed': False, 'vias_allowed': True,
+                                'nets': names - {own}, 'clearance': 0.0,
+                                'finger_band': 'column', 'ref': ref,
+                                'pad': p.pad_number})
+                    if own:
+                        out.append({'name': f"finger tail {ref}.{p.pad_number} {layer}",
+                                    'rule': None,
+                                    'polygon': rect(lefts[i], rights[i], outer[i], edge),
+                                    'holes': [], 'layers': {layer},
+                                    'tracks_allowed': False, 'vias_allowed': True,
+                                    'nets': frozenset({own}), 'clearance': 0.0,
+                                    'finger_band': 'tail', 'ref': ref,
+                                    'pad': p.pad_number})
+    return out
+
+
+def derive_mating_keepouts(pcb_data) -> List[dict]:
+    """The keep-outs a mating edge connector's geometry makes, with no rule
+    to name them: no via in a contact finger (#1116) and no copper in the
+    finger strip but a finger's own entry (#2022). One list for every
+    derivation site -- `design_rules.install_design_rules` and the KiCad
+    oracle's own re-parse (kicad_oracle), which re-derived only the rules
+    file's keep-outs and so welded GND through the strip and dropped a via in
+    two fingers at once."""
+    return derive_contact_fingers(pcb_data) + derive_finger_bands(pcb_data)
+
+
 def binds(ko: dict, net_name: str) -> bool:
     """True when keep-out `ko` forbids its items to net `net_name`."""
     return net_name in ko.get('nets', ())
@@ -559,13 +916,23 @@ def _stamper(pcb_data, idx: Tuple[int, ...]):
     kos = pcb_data._net_keepouts
     # mask_keepouts=False: the board's own map stamps the mask artwork; this
     # pass adds only the net-filtered keep-outs
+    plain = [kos[i] for i in idx
+             if not kos[i].get('edge_band') and not kos[i].get('part_clearance')]
+    parts = [kos[i] for i in idx if kos[i].get('part_clearance')]
     shim = SimpleNamespace(board_info=SimpleNamespace(
-        keepouts=[kos[i] for i in idx if not kos[i].get('edge_band')],
+        keepouts=plain + parts,
         board_bounds=getattr(pcb_data.board_info, 'board_bounds', None),
         mask_keepouts=False))
     bands = [kos[i] for i in idx if kos[i].get('edge_band')]
 
     def stamp_into(sink, cfg):
+        if parts:
+            # a part's clearance region (#2071) carries its own clearance,
+            # which replaces the config's -- and with it the member offset a
+            # centreline config folds into its clearance, so that is added back
+            off = float(getattr(cfg, 'edge_extra_clearance', 0.0) or 0.0)
+            shim.board_info.keepouts = plain + [
+                dict(ko, clearance=ko['clearance'] + off) for ko in parts]
         if shim.board_info.keepouts:
             # a centreline config's clearance carries the member half-pitch's
             # scalar; what a layer's own half-pitch adds past it rides here
@@ -577,6 +944,35 @@ def _stamper(pcb_data, idx: Tuple[int, ...]):
     return stamp_into
 
 
+def _unique_rows(parts, width):
+    """np.unique(np.concatenate(parts), axis=0), the same rows in the same
+    (lexicographic) order, by one 1-D unique on the rows packed into int64
+    when their span fits (the axis=0 unique sorts structured rows, several
+    times slower on the hundred-thousand-cell sets a finger strip stamps)."""
+    if not parts:
+        return np.empty((0, width), dtype=np.int32)
+    arr = np.concatenate(parts)
+    if len(arr) == 0:
+        return np.empty((0, width), dtype=np.int32)
+    lo = arr.min(axis=0).astype(np.int64)
+    span = arr.max(axis=0).astype(np.int64) - lo + 1
+    total = 1
+    for v in span:
+        total *= int(v)
+    if total >= (1 << 62):
+        return np.unique(arr, axis=0)
+    rel = arr.astype(np.int64) - lo
+    packed = rel[:, 0]
+    for c in range(1, width):
+        packed = packed * int(span[c]) + rel[:, c]
+    packed = np.unique(packed)
+    out = np.empty((len(packed), width), dtype=np.int64)
+    for c in range(width - 1, 0, -1):
+        packed, out[:, c] = np.divmod(packed, int(span[c]))
+    out[:, 0] = packed
+    return (out + lo).astype(arr.dtype)
+
+
 def _cells_for(pcb_data, idx: Tuple[int, ...], config) -> Tuple[np.ndarray, np.ndarray]:
     """(track cells (N, 3), via cells (M, 2)) keep-outs `idx` stamp at the
     run's geometry. Cached per (binding set, geometry, clip) on pcb_data.
@@ -585,20 +981,33 @@ def _cells_for(pcb_data, idx: Tuple[int, ...], config) -> Tuple[np.ndarray, np.n
     to it and a rescue window (plane_pad_tap.make_local_window) is a SHALLOW
     copy that shares this cache dict with the whole board: keyed on geometry
     alone, a window's clipped cells would be handed to a whole-board route
-    at the same geometry, which would then see only part of the region."""
-    key = (idx, config.grid_step, config.track_width, config.clearance,
+    at the same geometry, which would then see only part of the region.
+
+    Each REGION is rasterised once per geometry and a binding set is the
+    union of its regions' cells: the native pass stamps every keep-out on its
+    own, so the union is what the joint pass stamps. A finger strip gives
+    each finger net its own set (every column but its own), and rasterising
+    each set whole cost every such net the strip's full rasterisation."""
+    geo = (config.grid_step, config.track_width, config.clearance,
            getattr(config, 'edge_extra_clearance', 0.0),
            config.via_size, config.via_drill, tuple(config.layers),
            getattr(pcb_data.board_info, 'board_bounds', None))
+    key = (idx,) + geo
     cache: Dict = pcb_data.__dict__.setdefault('_net_keepout_cells', {})
     if key not in cache:
-        rec = _Recorder()
-        _stamper(pcb_data, idx)(rec, config)
-        cells = (np.unique(np.concatenate(rec.cells), axis=0) if rec.cells
-                 else np.empty((0, 3), dtype=np.int32))
-        vias = (np.unique(np.concatenate(rec.vias), axis=0) if rec.vias
-                else np.empty((0, 2), dtype=np.int32))
-        cache[key] = (cells, vias)
+        cells, vias = [], []
+        for i in idx:
+            one = ('region', i) + geo
+            if one not in cache:
+                rec = _Recorder()
+                _stamper(pcb_data, (i,))(rec, config)
+                cache[one] = (_unique_rows(rec.cells, 3), _unique_rows(rec.vias, 2))
+            c, v = cache[one]
+            if len(c):
+                cells.append(c)
+            if len(v):
+                vias.append(v)
+        cache[key] = (_unique_rows(cells, 3), _unique_rows(vias, 2))
     return cache[key]
 
 
@@ -776,6 +1185,11 @@ def audit_items(pcb_data, segments, vias, keepouts):
         def near(x, y, r):
             return any(point_to_polygon_edge_distance(x, y, rg) < r - eps for rg in rings)
 
+        # a part's clearance region (#2071) forbids copper within its
+        # `clearance` of the ring (edge to edge), every other region its
+        # inside (0.0 or no key)
+        gap = float(ko.get('clearance') or 0.0)
+
         def hit(xa, ya, xb, yb, r):
             if (max(xa, xb) < x0 - r or min(xa, xb) > x1 + r
                     or max(ya, yb) < y0 - r or min(ya, yb) > y1 + r):
@@ -790,13 +1204,14 @@ def audit_items(pcb_data, segments, vias, keepouts):
                 if getattr(s, 'graphic', False) or not _on_layer(ko['layers'], s.layer):
                     continue
                 if bound(ko, s.net_id) and hit(s.start_x, s.start_y, s.end_x, s.end_y,
-                                               s.width / 2):
+                                               s.width / 2 + gap):
                     yield ko, 'track', s
         if not ko.get('vias_allowed', True):
             for v in vias:
                 if not any(_on_layer(ko['layers'], l) for l in _via_layers(v, copper)):
                     continue
-                if bound(ko, v.net_id) and (inside(v.x, v.y) or near(v.x, v.y, v.size / 2)):
+                if bound(ko, v.net_id) and (inside(v.x, v.y)
+                                            or near(v.x, v.y, v.size / 2 + gap)):
                     yield ko, 'via', v
 
 
@@ -819,10 +1234,11 @@ def via_site_filter(pcb_data, net_id: int, via_size: float, layers=None):
     if not kos:
         return None
     view = SimpleNamespace(nets={net_id: net}, board_info=pcb_data.board_info)
-    r = via_size / 2
-    boxes = [(min(p[0] for p in ko['polygon']) - r, min(p[1] for p in ko['polygon']) - r,
-              max(p[0] for p in ko['polygon']) + r, max(p[1] for p in ko['polygon']) + r)
-             for ko in kos]
+    boxes = []
+    for ko in kos:
+        r = via_size / 2 + float(ko.get('clearance') or 0.0)
+        boxes.append((min(p[0] for p in ko['polygon']) - r, min(p[1] for p in ko['polygon']) - r,
+                      max(p[0] for p in ko['polygon']) + r, max(p[1] for p in ko['polygon']) + r))
     vlayers = list(layers or ())
 
     def allowed(x, y):
@@ -872,4 +1288,5 @@ def format_audit(found: List[dict], where: str) -> str:
     parts = '; '.join(f"{r['region']}: {r['net']} "
                       f"({r['tracks']} track(s), {r['vias']} via(s))" for r in found)
     return (f"WARNING: net-filtered keep-outs: {items} bound-net item(s) inside a "
-            f"region on {where} (KiCad reports them as items_not_allowed): {parts}")
+            f"region on {where} (KiCad reports them as items_not_allowed, or as "
+            f"clearance for a part's clearance rule): {parts}")

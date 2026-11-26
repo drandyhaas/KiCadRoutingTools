@@ -2614,7 +2614,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print("End-to-end AC-coupled diff-pair length matching (#196)")
         print("=" * 60)
         for _xn in ac_xnets:
-            _acr = apply_ac_coupled_length_matching(_xn, routed_results, config, pcb_data)
+            _acr = apply_ac_coupled_length_matching(
+                _xn, routed_results, config, pcb_data,
+                pair_diagnostics=state.pair_diagnostics)
             # #1799: the pass's own verdict; re-read off the shipped copper
             # below (regrade_ac_chains), as the per-pair records are.
             ac_coupled_summary.append({
@@ -2707,11 +2709,17 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     dp_scope = diff_cleanup_scope(
         diff_pair_ids_to_route, routed_results, state.diff_pair_single_ended_nets,
         lambda nid: _dpc_member_connected(pcb_data, nid))
+    # #1978: an AC-coupled chain this step matches end to end is length-matched
+    # too, though its pairs are not in config.skew_graded_net_ids
+    _ac_matched_ids = ({nid for _xn in ac_xnets
+                        for nid in (_xn.p_net_ids + _xn.n_net_ids)}
+                       if config.ac_couple_match else set())
     _dp_cleanup = run_post_route_cleanup(
         results, pcb_data, dp_scope, config,
         label='Diff-pair ', snap=False, phantom=False, neck=False,
         keep_input_copper=keep_input_copper,
-        progress_callback=progress_callback)
+        progress_callback=progress_callback,
+        extra_length_matched_net_ids=_ac_matched_ids)
     # #1843: a coupled pair is laid at one gap, so a tightened rule area it
     # passes through is not honoured between P and N: said so, per pair.
     from area_clearance import pair_gaps_below
@@ -3678,13 +3686,16 @@ Examples:
                         help="Soft keep-away between two net groups, repeatable: while a pair "
                              "with a net on one side routes, cells where it would sit closer "
                              "than GAP mm (edge to edge, same layer) to copper of the other "
-                             "side cost --keep-away-cost. Each side is comma-separated net "
+                             "side (pads, tracks, vias and pours; a pour's band from its zone "
+                             "outline) cost --keep-away-cost. AGG:VICTIM:GAP:adjacent also "
+                             "prices the other side's copper on the copper layers next to the "
+                             "routed one, in plan view. Each side is comma-separated net "
                              "patterns as in --nets and/or net classes as class=NAME, e.g. "
                              "'class=Clocks:/AUDIO_*:0.5'. Nets of one side route against "
                              "each other at the normal clearance. GAP is at most 10 mm; rules "
                              "are split on spaces, so write a space inside a name as '?'. The "
-                             "run reports per net the length left inside a band "
-                             "(JSON_SUMMARY keep_away).")
+                             "run reports per net the length left inside a band, and what "
+                             "it did not measure (JSON_SUMMARY keep_away).")
     parser.add_argument("--keep-away-free", type=float, default=defaults.KEEP_AWAY_FREE,
                         help=f"Within this many mm of the routed pair's own pads the keep-away "
                              f"band is not priced (default: {defaults.KEEP_AWAY_FREE})")
