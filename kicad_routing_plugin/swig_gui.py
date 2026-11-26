@@ -1214,7 +1214,11 @@ class RoutingDialog(wx.Dialog):
                     "net classes as class=NAME. Applies to the Route and Differential "
                     "tabs. While a net "
                     "of one side routes, cells closer than GAP mm (edge to edge, same "
-                    "layer) to the other side's copper cost Keep-away Cost. Nets of "
+                    "layer) to the other side's copper -- pads, tracks, vias and "
+                    "pours (a pour's band from its zone outline) -- cost Keep-away "
+                    "Cost; AGGRESSOR:VICTIM:GAP:adjacent also prices the other side's "
+                    "copper on the copper layers next to the routed one, in plan "
+                    "view. Nets of "
                     "one side route against each other at the normal clearance. The "
                     "log reports per net the length left inside a band. Empty = off.")
                 grid.Add(self.keep_away, 0, wx.EXPAND)

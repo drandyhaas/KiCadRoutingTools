@@ -10180,7 +10180,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if final_reconcile and not _ckpt_stop and getattr(config, 'keep_away', None):
         from keep_away import disclose_keep_away
         _rd_ka = locals().get('results_data')
-        _ka_board = _ka_on = None
+        _ka_board = _ka_on = _ka_islands = None
         if return_results and _rd_ka is not None:
             _ka_s, _ka_v = _gui_write_model(_rd_ka)
             _ka_board = _BoardCopper(pcb_data,
@@ -10191,8 +10191,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             from kicad_parser import parse_kicad_pcb as _pk_ka
             _ka_board = _pk_ka(output_file)
             _ka_on = 'written board'
+            # #2070: the other side's pours on KiCad's refill of the written
+            # file when this run already made one (the final re-grade's, the
+            # oracle's); else on their outlines. Never a refill of its own.
+            from kicad_exact_fill import memoized_refill_islands
+            _ka_islands = memoized_refill_islands(output_file,
+                                                  project_from=input_file)
         if _ka_board is not None:
-            _ka_shipped = disclose_keep_away(_ka_board, config, quiet=True)
+            _ka_shipped = disclose_keep_away(_ka_board, config, quiet=True,
+                                             pour_islands=_ka_islands)
         if _ka_shipped is not None and 'rules' in _ka_shipped:
             _ka_shipped['measured_on'] = _ka_on
             _ka_first = (locals().get('summary') or {}).get('keep_away') or {}
@@ -11148,14 +11155,17 @@ For differential pair routing, use route_diff.py:
                         help="Soft keep-away between two net groups, repeatable: while a net "
                              "of one side routes, its track costs --keep-away-cost per cell "
                              "where it would sit closer than GAP mm (edge to edge, same layer) "
-                             "to copper of the other side. Each side is comma-separated net "
+                             "to copper of the other side: pads, tracks, vias and pours (a "
+                             "pour's band from its zone outline). AGG:VICTIM:GAP:adjacent "
+                             "also prices the other side's copper on the copper layers next "
+                             "to the routed one, in plan view. Each side is comma-separated net "
                              "patterns as in --nets and/or net classes as class=NAME, e.g. "
                              "'CLK*,/I2C_*:/AUDIO_*:0.5' or 'class=Digital:class=Audio:0.5'. "
                              "Nets of one side route against each other at the normal "
                              "clearance. GAP is at most 10 mm; rules are split on spaces, "
                              "so write a space inside a name as '?'. The "
-                             "run reports per net the length left inside a band "
-                             "(JSON_SUMMARY keep_away).")
+                             "run reports per net the length left inside a band, and what "
+                             "it did not measure (JSON_SUMMARY keep_away).")
     parser.add_argument("--keep-away-free", type=float, default=defaults.KEEP_AWAY_FREE,
                         help=f"Within this many mm of the routed net's own pads the keep-away "
                              f"band is not priced, so a pin can leave a package whose other "

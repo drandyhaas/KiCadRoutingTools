@@ -3686,13 +3686,16 @@ Examples:
                         help="Soft keep-away between two net groups, repeatable: while a pair "
                              "with a net on one side routes, cells where it would sit closer "
                              "than GAP mm (edge to edge, same layer) to copper of the other "
-                             "side cost --keep-away-cost. Each side is comma-separated net "
+                             "side (pads, tracks, vias and pours; a pour's band from its zone "
+                             "outline) cost --keep-away-cost. AGG:VICTIM:GAP:adjacent also "
+                             "prices the other side's copper on the copper layers next to the "
+                             "routed one, in plan view. Each side is comma-separated net "
                              "patterns as in --nets and/or net classes as class=NAME, e.g. "
                              "'class=Clocks:/AUDIO_*:0.5'. Nets of one side route against "
                              "each other at the normal clearance. GAP is at most 10 mm; rules "
                              "are split on spaces, so write a space inside a name as '?'. The "
-                             "run reports per net the length left inside a band "
-                             "(JSON_SUMMARY keep_away).")
+                             "run reports per net the length left inside a band, and what "
+                             "it did not measure (JSON_SUMMARY keep_away).")
     parser.add_argument("--keep-away-free", type=float, default=defaults.KEEP_AWAY_FREE,
                         help=f"Within this many mm of the routed pair's own pads the keep-away "
                              f"band is not priced (default: {defaults.KEEP_AWAY_FREE})")

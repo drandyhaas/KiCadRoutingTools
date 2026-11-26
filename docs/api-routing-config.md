@@ -226,7 +226,11 @@ names two sides as comma-separated net patterns (resolved like `--nets`)
 and/or net classes as `class=NAME` (a glob; `!class=NAME` takes one out,
 `class=Default` is every net no class claims; a class never brings in an
 `unconnected-*` net), and a GAP in mm (at most 10), edge to edge on the same
-layer. Rules are separated by spaces, so a space inside a net or class name
+layer. An optional fourth field, `AGG:VICTIM:GAP:adjacent` (#2070), also
+prices the other side's copper on the copper layers next to the routed one in
+the board's stack (the stackup's copper order), in plan view -- copper on a
+layer the run does not route included -- for coupling to the next layer.
+Without it a rule sees the routed layer only. Rules are separated by spaces, so a space inside a net or class name
 is written `?` (`class=High?Speed`). `class=Digital:class=Audio:0.5` is KiCad's
 `A.NetClass == 'Digital' && B.NetClass == 'Audio'` as a soft rule; classes
 are read from the board's project by the resolver the router and `check_drc`
@@ -234,8 +238,12 @@ share. The run logs one line per rule with the number of nets each side
 resolved to, and a warning, once, for each pattern that matched nothing.
 While a net of either side is
 routed, every cell where its track would sit closer than GAP to the other
-side's copper (pads, tracks, vias -- pre-existing copper and copper routed
-earlier in the run alike) costs `keep_away_cost` on the **layer map**.
+side's copper (pads, tracks, vias, and pours -- pre-existing copper and
+copper routed earlier in the run alike) costs `keep_away_cost` on the
+**layer map**. A pour gives way to a track, so a pour's band is drawn from its
+zone OUTLINE (#2070): every cell inside the outline, or within GAP of it, on
+the zone's layer, less a cut-out's interior deeper than GAP; KiCad's
+generated teardrops are not pours and are left out.
 Nets of one side route against each other at the normal clearance, and a net
 matching both sides keeps away from both. The clearance stays the hard floor;
 the keep-away is soft, so a band the router cannot avoid is still routed
@@ -275,7 +283,16 @@ does not hand back a band the router kept clear.
 Because it is soft, the route step measures what shipped: per net of either
 group left inside a band, the track length inside it beyond the free radius,
 the closest spacing to the other side's copper and the net it came closest
-to, with board totals. The printed `JSON_SUMMARY['keep_away']` is the first
+to, with board totals. The other side's pours are measured on KiCad's refill
+of the shipped copper when the run already made one (the final re-grade's or
+the oracle's, memoized on the written file), else on the zone outlines, which
+the fill lies inside; `pour_measured_on` (`"kicad_refill"` or `"outline"`,
+present when a rule's net pours) says which, and no refill is ever run for the
+report alone. `not_measured` lists what the rules do not look at -- copper on
+other layers for a rule without `:adjacent`, copper two or more layers away for
+one with it -- and the log prints it as `not measured: ...` under the
+`Keep-away (...)` line, so `0 mm inside a band` is not read as clear on every
+layer. The printed `JSON_SUMMARY['keep_away']` is the first
 pass's reading; `route.py` measures again on the board it ships, after the
 plane finalize and the reconciliation, and that reading is the one
 `--json-out` carries (`measured_on`), the GUI's `results_data['keep_away']`

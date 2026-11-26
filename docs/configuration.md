@@ -1017,7 +1017,7 @@ The options above are on both `route.py` and `route_diff.py` unless marked.
 | `--bga-proximity-cost` | 0.2 | Cost penalty at BGA edge (mm equivalent) |
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize on same layer (mm) |
 | `--track-proximity-cost` | 0.0 | Cost penalty near routed tracks (0 = disabled) |
-| `--keep-away AGG:VICTIM:GAP` | (off) | Soft keep-away between two net groups (#1146), repeatable. While a net of one side routes, cells where its track would sit closer than GAP mm (edge to edge, same layer) to the other side's copper cost `--keep-away-cost`. Each side is comma-separated net patterns as in `--nets` and/or net classes as `class=NAME` (`!class=NAME` takes one out), e.g. `class=Digital:class=Audio:0.5`. `route.py` and `route_diff.py`. The board's design brief may declare rules too (its `keep_away` list, #1253); they are added to these with no flag. See [Keep-away](api-routing-config.md#pairwise-keep-away-keep_away--keep_away_free--keep_away_cost) |
+| `--keep-away AGG:VICTIM:GAP` | (off) | Soft keep-away between two net groups (#1146), repeatable. While a net of one side routes, cells where its track would sit closer than GAP mm (edge to edge, same layer) to the other side's copper -- pads, tracks, vias and pours (a pour's band from its zone outline, #2070) -- cost `--keep-away-cost`. `AGG:VICTIM:GAP:adjacent` also prices the other side's copper on the copper layers next to the routed one, in plan view. Each side is comma-separated net patterns as in `--nets` and/or net classes as `class=NAME` (`!class=NAME` takes one out), e.g. `class=Digital:class=Audio:0.5`. `route.py` and `route_diff.py`. The board's design brief may declare rules too (its `keep_away` list, #1253); they are added to these with no flag. See [Keep-away](api-routing-config.md#pairwise-keep-away-keep_away--keep_away_free--keep_away_cost) |
 | `--keep-away-free` | 1.5 | Within this distance of the routed net's own pads the keep-away band is not priced (mm) |
 | `--keep-away-cost` | 0.5 | Cost per cell inside a keep-away band (mm equivalent; 0 = measure and report only) |
 | `--vertical-attraction-radius` | 1.0 | Radius for cross-layer track attraction (mm) |
@@ -1443,7 +1443,7 @@ class GridRouteConfig:
     track_proximity_cost: float = 0.0      # mm equivalent (0 = disabled)
 
     # Pairwise keep-away between net groups (#1146)
-    keep_away: Tuple[str, ...] = ()        # 'AGG:VICTIM:GAP' rules
+    keep_away: Tuple[str, ...] = ()        # 'AGG:VICTIM:GAP[:adjacent]' rules
     keep_away_free: float = 1.5            # mm around the routed net's own pads
     keep_away_cost: float = 0.5            # mm equivalent per cell (0 = report only)
 
