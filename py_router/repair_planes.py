@@ -84,6 +84,10 @@ LAST_RIPPED_CUSTODY: Optional[Dict] = None
 # leg: the oracle re-parses its board, so an id-keyed map could land on other
 # nets. {} = no class map (the flat clearance).
 LAST_NET_CLEARANCES_BY_NAME: Dict[str, float] = {}
+# The run's per-net width maps by net name ({field: {name: width}},
+# kicad_oracle.oracle_net_widths_by_name), for the CLI's oracle recheck: it
+# builds its own config, which knows no power or class width.
+LAST_NET_WIDTHS_BY_NAME: Dict[str, dict] = {}
 
 
 def plane_tap_launch_layers(pad, zone_layers, routing_layers) -> List[str]:
@@ -1134,8 +1138,9 @@ def _repair_planes_all(
     # the CLI passes a real default (never None), so this is a no-op there.
     if zone_clearance is None:
         zone_clearance = clearance if clearance is not None else defaults.PLANE_ZONE_CLEARANCE
-    global LAST_NET_CLEARANCES_BY_NAME
+    global LAST_NET_CLEARANCES_BY_NAME, LAST_NET_WIDTHS_BY_NAME
     LAST_NET_CLEARANCES_BY_NAME = {}   # #1137: this run's, set below
+    LAST_NET_WIDTHS_BY_NAME = {}
     from route import _dump_engine_config
     _dump_engine_config('repair_planes', dict(locals()))
     # Board-setup copper-to-edge rule (#338): engine-side so the GUI planes
@@ -1309,6 +1314,9 @@ def _repair_planes_all(
         config, pcb_data, input_file, net_ids, net_track_widths,
         net_layer_widths, min_track_width, max_track_width,
         design_rules=join_design_rules)
+    if pcb_data is not None:
+        from kicad_oracle import oracle_net_widths_by_name
+        LAST_NET_WIDTHS_BY_NAME = oracle_net_widths_by_name(config, pcb_data.nets)
     # #581: keep repair vias (pad taps, region joins, reconnects) off same-net
     # pads when the constraint is active. Explicit kwarg wins (route.py's #562
     # finalize forwards its resolved value -- the output's .kicad_pro sibling
@@ -4315,7 +4323,8 @@ Examples:
                                 hole_to_hole_clearance=args.hole_to_hole_clearance,
                                 verbose=args.verbose,
                                 project_from=args.input_file,
-                                net_clearances_by_name=LAST_NET_CLEARANCES_BY_NAME)
+                                net_clearances_by_name=LAST_NET_CLEARANCES_BY_NAME,
+                                net_widths_by_name=LAST_NET_WIDTHS_BY_NAME)
         try:
             import json as _json
             print('JSON_ORACLE: ' + _json.dumps(
