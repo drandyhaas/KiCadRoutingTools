@@ -218,8 +218,8 @@ The tier is a **floor ladder**:
 **Escalation policy** (`--escalation`, the same choice on the GUI's Route tab) is
 orthogonal to the tier and bounds every place the engine narrows a track, shrinks a
 via or tightens a clearance to complete a net: the per-net rescue, the terminal
-escalation, the terminal graze neck, fine-pitch plane taps, via-in-pad clamps and
-last-resort vias. Under the default `fab`, a descent may go down to the fab tier
+escalation, the terminal graze neck, fine-pitch plane taps, plane region joins,
+via-in-pad clamps and last-resort vias. Under the default `fab`, a descent may go down to the fab tier
 floor, below the board's own declared minimums (the writeback then lowers the
 project's `rules.min_*` to match, as before); this is the completion-first setting.
 Under `board`, a descent stops at the board's own `rules.min_*` (Board Setup >
