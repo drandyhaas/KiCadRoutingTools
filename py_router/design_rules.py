@@ -193,6 +193,32 @@ KIND_ALIASES = {
     'hole_to_hole_clearance': 'hole_to_hole', 'min_track_width': 'track_width',
 }
 
+# Rule guard (`DesignRules.unmodelled_rules`): the .kicad_pro net-class keys
+# the resolver reads, and those KiCad's copper DRC does not grade (schematic
+# styling, colours; diff_pair_via_gap is a router hint KiCad grades nowhere).
+# Any other key with a value is listed as unmodelled.
+_NETCLASS_READ_KEYS = frozenset({
+    'name', 'priority', 'clearance', 'track_width', 'via_diameter', 'via_drill',
+    'diff_pair_gap', 'diff_pair_width', 'diff_pair_via_gap', 'microvia_diameter',
+    'microvia_drill', 'nets'})
+_NETCLASS_NON_COPPER_KEYS = frozenset({
+    'bus_width', 'wire_width', 'line_style', 'pcb_color', 'schematic_color',
+    'tuning_profile'})
+# Board Setup minimums KiCad grades on items this router never draws (silk,
+# text, mask, zone spokes, slots): not routing constraints.
+_BOARD_MIN_NON_COPPER = frozenset({
+    'min_silk_clearance', 'min_text_height', 'min_text_thickness',
+    'min_resolved_spokes', 'min_groove_width'})
+
+
+# KiCad 6 Board Setup keys a later KiCad renamed; a project carrying both
+# names is graded by the new one only (the old one is a stale leftover).
+_BOARD_MIN_RENAMED = {'min_via_annulus': 'min_via_annular_width'}
+
+
+def _BOARD_MIN_READ_KEYS():
+    return set(BOARD_MIN_KEYS.values()) | set(MICROVIA_BOARD_MIN_KEYS.values())
+
 # kind -> the Board Setup key (.kicad_pro board.design_settings.rules).
 BOARD_MIN_KEYS = {
     'clearance': 'min_clearance',
@@ -1890,6 +1916,9 @@ class DesignRules:
     source: str = ''
     dru_path: str = ''
     notes: List[str] = field(default_factory=list)
+    # project-file constraint keys KiCad's DRC may read and the resolver does
+    # not (`unmodelled_rules`): 'netclass NAME: KEY' / 'board setup: KEY'
+    unread_keys: List[str] = field(default_factory=list)
     # `dru_refusals` of this board's .kicad_dru: the model's answer, which
     # `kicad_refused` reads only when KiCad cannot be asked (#1852)
     model_refused: List[dict] = field(default_factory=list)
@@ -2054,6 +2083,10 @@ class DesignRules:
                 d['priority'] = int(c.get('priority', _DEFAULT_PRIORITY
                                           if name == 'Default' else 0))
                 self.classes[name] = d
+                for k, v in c.items():
+                    if (k not in _NETCLASS_READ_KEYS and k not in _NETCLASS_NON_COPPER_KEYS
+                            and v not in (None, '', [], {}) and not isinstance(v, bool)):
+                        self.unread_keys.append(f"netclass '{name}': {k}")
                 self.unset_fields[name] = frozenset(
                     k for k in _CLASS_COMPLETE_FIELDS
                     if not isinstance(c.get(k), (int, float)))
@@ -2064,6 +2097,9 @@ class DesignRules:
             for k, v in rules.items():
                 if k.startswith('min_') and isinstance(v, (int, float)) and v > 0:
                     self.board_min[k] = float(v)
+                    if (k not in _BOARD_MIN_READ_KEYS() and k not in _BOARD_MIN_NON_COPPER
+                            and _BOARD_MIN_RENAMED.get(k) not in rules):
+                        self.unread_keys.append(f"board setup: {k}")
             self.microvia_drill_undeclared = 'min_microvia_drill' not in rules
             self.rule_severities = {str(k): str(v) for k, v in
                                     (ds.get('rule_severities') or {}).items()}
@@ -2818,6 +2854,53 @@ class DesignRules:
     def unconsumed(self) -> List[Tuple[str, List[str]]]:
         return [(r.name, r.unconsumed_kinds) for r in self.rules
                 if not r.unsupported and r.unconsumed_kinds]
+
+    # kind -> the net-class field the router draws/spaces at (floored by the
+    # Board Setup minimum) when it cannot evaluate a rule's condition
+    _RELAX_CLASS_FIELD = {'clearance': 'clearance', 'track_width': 'track_width',
+                          'via_diameter': 'via_diameter', 'hole_size': 'via_drill',
+                          'diff_pair_gap': 'diff_pair_gap', 'edge_clearance': None,
+                          'hole_to_hole': None, 'hole_clearance': None,
+                          'annular_width': None, 'connection_width': None}
+
+    def _relaxes_only(self, r: 'Rule') -> bool:
+        """Every constraint of ``r`` is a bare minimum no larger than the
+        smallest value the router applies without the rule (net class floored
+        by Board Setup): skipping it leaves the router stricter than KiCad,
+        so it adds no DRC error, only lost room."""
+        if not r.constraints:
+            return False
+        for kind, spec in r.constraints.items():
+            if kind not in self._RELAX_CLASS_FIELD or not isinstance(spec, dict):
+                return False
+            if spec.get('disallow') or spec.get('max') is not None or spec.get('min') is None:
+                return False
+            bkey = BOARD_MIN_KEYS.get(kind)
+            bmin = self.board_min.get(bkey, 0.0) if bkey else 0.0
+            f = self._RELAX_CLASS_FIELD[kind]
+            vals = [max(d[f], bmin) for d in self.classes.values() if f and f in d]
+            least = min(vals) if vals else bmin
+            if float(spec['min']) > least + 1e-9:
+                return False
+        return True
+
+    def unmodelled_rules(self) -> List[str]:
+        """The rule guard: every constraint in this board's rule sources that
+        KiCad's DRC grades and no routing step obeys, one line each. A rule
+        whose condition the resolver cannot evaluate, a parsed kind with no
+        router consumer (a graded-only length/skew window included), and a
+        project-file key the resolver does not read. Empty = the router
+        models every rule KiCad will grade."""
+        relax = {r.name for r in self.rules if self._relaxes_only(r)}
+        out = [f".kicad_dru rule '{n}': {why}"
+               + (' [relaxes only: the router stays stricter, no DRC risk]'
+                  if n in relax else '')
+               for n, why in self.unsupported()]
+        for n, kinds in self.unconsumed():
+            out.append(f".kicad_dru rule '{n}': {', '.join(kinds)} not routed to"
+                       + (' (graded only)' if set(kinds) <= GRADED_ONLY_KINDS else ''))
+        out.extend(f".kicad_pro {k}: not read" for k in self.unread_keys)
+        return out
 
     def report_lines(self) -> List[str]:
         out = kicad_refusal_lines(self.kicad_refused)
@@ -4134,4 +4217,24 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
         _ANNOUNCED.add(key)
         for line in rules.report_lines():
             print(f"  {line}")
+        guard_unmodelled_rules(rules)
     return rules
+
+
+def guard_unmodelled_rules(rules: 'DesignRules') -> List[str]:
+    """Print the rules this router does not model (`unmodelled_rules`) as a
+    warning; with KICAD_RULES_STRICT=1 refuse to route (SystemExit, which no
+    `except Exception` around a route step swallows)."""
+    lines = rules.unmodelled_rules()
+    risky = [l for l in lines if not l.endswith('no DRC risk]')]
+    if lines:
+        print(f"  RULE GUARD: {len(lines)} rule(s) KiCad grades that the router "
+              f"does not model ({len(risky)} can add DRC errors):")
+        for line in lines:
+            print(f"    {line}")
+    else:
+        print("  RULE GUARD: the router models every rule of this board")
+    if risky and os.environ.get('KICAD_RULES_STRICT', '') not in ('', '0'):
+        raise SystemExit(f"RULE GUARD (KICAD_RULES_STRICT): {len(risky)} unmodelled "
+                         f"rule(s); first: {risky[0]}")
+    return lines
