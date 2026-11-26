@@ -953,6 +953,256 @@ def relax_lane(P, cls, anchors, Ds, Cs, Ts, pitch, window, rounds=250, gain=1.0,
     return P, it + 1, hug
 
 
+# ------------------------------------------------------------ the jump
+
+# THE JUMP'S PACK, opt-in (the setting PACK_JUMP=1; off: the pack as before, each lane relaxed taut against the one
+# packed before it): the lanes packed from the bus's centre out, each run laid on the free room's least-measure way
+# beside the bus's copper packed inside it, whichever side of an obstacle that takes it (jump_string), every move kept
+# only where it lowers the pack's measure -- length + PACK_PULL x the run's distance from that copper, up to
+# PACK_REACH mm -- and the whole pack again until no lane moves (pack_until_still). PACK_STACK=1: that copper every
+# layer's, a run drawn under or over the bus on the other layers too
+JUMP =awx_settings.get('PACK_JUMP', '0') not in ('', '0')
+CENTRE = awx_settings.get('PACK_CENTRE', 'geo')     # the jump's centre: 'geo' the bus's centre line, 'order' its order
+STACK = awx_settings.get('PACK_STACK', '0') not in ('', '0')    # the bus drawn in across layers too (off: each layer)
+JUMP_CELL = 0.02              # (mm) the free room's raster
+JUMP_REACH = 3.0              # (mm) round a run, where its way may go
+JUMP_CELLS = 900000           # a run's raster at most this many cells (the cell grows)
+
+
+def _free_raster(D, C, x0, y0, nx, ny, h):
+    """free[j, i]: the centre of cell (i, j) clear of every disc (x, y, r) of D and capsule (ax, ay, dx, dy, r) of C"""
+    free = np.ones((ny, nx), dtype=bool)
+    X = x0 + (np.arange(nx) + 0.5) * h
+    Y = y0 + (np.arange(ny) + 0.5) * h
+    x1, y1 = x0 + nx * h, y0 + ny * h
+    for x, y, r in D:
+        if x + r < x0 or x - r > x1 or y + r < y0 or y - r > y1:
+            continue
+        i0, i1 = max(int((x - r - x0) / h), 0), min(int((x + r - x0) / h) + 1, nx)
+        j0, j1 = max(int((y - r - y0) / h), 0), min(int((y + r - y0) / h) + 1, ny)
+        if i0 >= i1 or j0 >= j1:
+            continue
+        dx = X[i0:i1][None, :] - x
+        dy = Y[j0:j1][:, None] - y
+        free[j0:j1, i0:i1] &= dx * dx + dy * dy >= r * r
+    for ax, ay, ux, uy, r in C:
+        bx, by = ax + ux, ay + uy
+        if max(ax, bx) + r < x0 or min(ax, bx) - r > x1 or max(ay, by) + r < y0 or min(ay, by) - r > y1:
+            continue
+        i0, i1 = max(int((min(ax, bx) - r - x0) / h), 0), min(int((max(ax, bx) + r - x0) / h) + 1, nx)
+        j0, j1 = max(int((min(ay, by) - r - y0) / h), 0), min(int((max(ay, by) + r - y0) / h) + 1, ny)
+        if i0 >= i1 or j0 >= j1:
+            continue
+        px = np.broadcast_to(X[i0:i1][None, :] - ax, (j1 - j0, i1 - i0))
+        py = np.broadcast_to(Y[j0:j1][:, None] - ay, (j1 - j0, i1 - i0))
+        ll = ux * ux + uy * uy
+        t = np.clip((px * ux + py * uy) / ll, 0.0, 1.0) if ll > 1e-12 else np.zeros(px.shape)
+        ex, ey = px - t * ux, py - t * uy
+        free[j0:j1, i0:i1] &= ex * ex + ey * ey >= r * r
+    return free
+
+
+def _sight(free, x0, y0, h, a, b):
+    """the straight way from point a to point b in free cells, sampled every half a cell"""
+    n = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / (h / 2)) + 1)
+    t = np.linspace(0.0, 1.0, n)
+    i = ((a[0] + (b[0] - a[0]) * t - x0) / h).astype(int)
+    j = ((a[1] + (b[1] - a[1]) * t - y0) / h).astype(int)
+    ny, nx = free.shape
+    if (i < 0).any() or (i >= nx).any() or (j < 0).any() or (j >= ny).any():
+        return False
+    return bool(free[j, i].all())
+
+
+def _chord_cost(a, b, dist, x0, y0, h):
+    """the pack's measure of the chord a-b on the raster: its length x (1 + PULL x its mean distance)"""
+    L_ = math.hypot(b[0] - a[0], b[1] - a[1])
+    n = max(2, int(L_ / (h / 2)) + 1)
+    t = np.linspace(0.0, 1.0, n)
+    ny, nx = dist.shape
+    i = np.clip(((a[0] + (b[0] - a[0]) * t - x0) / h).astype(int), 0, nx - 1)
+    j = np.clip(((a[1] + (b[1] - a[1]) * t - y0) / h).astype(int), 0, ny - 1)
+    return L_ * (1.0 + PULL * float(dist[j, i].mean()))
+
+
+def _pulled_by_measure(pts, free, dist, x0, y0, h):
+    """`pts` (a raster path, its ends exact) pulled by sight under the pack's measure: from each point the farthest
+    later one it sees whose chord costs no more than the path between (its ends kept)"""
+    n = len(pts)
+    if n <= 2:
+        return list(pts)
+    cum = [0.0]
+    for a, b in zip(pts, pts[1:]):
+        cum.append(cum[-1] + _chord_cost(a, b, dist, x0, y0, h))
+    out, k = [pts[0]], 0
+    while k < n - 1:
+        best, m = k + 1, k + 2
+        while m < n and _sight(free, x0, y0, h, pts[k], pts[m]) and \
+                _chord_cost(pts[k], pts[m], dist, x0, y0, h) <= cum[m] - cum[k] + 1e-9:
+            best, m = m, m + 1
+        out.append(pts[best])
+        k = best
+    return out
+
+
+def _weighted_path(free, cost, s, t):
+    """the cells (j, i) of the cheapest 8-way path from cell s to cell t through free cells, a step's price its length
+    times the mean of its two cells' `cost`; or None"""
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import dijkstra
+    ny, nx = free.shape
+    idx = -np.ones((ny, nx), dtype=np.int64)
+    js, is_ = np.nonzero(free)
+    idx[js, is_] = np.arange(len(js))
+    si, ti = idx[s], idx[t]
+    if si < 0 or ti < 0:
+        return None
+    rows, cols, wts = [], [], []
+    for dj, di, w in ((0, 1, 1.0), (1, 0, 1.0), (1, 1, math.sqrt(2.0)), (1, -1, math.sqrt(2.0))):
+        a = idx[0:ny - dj, max(-di, 0):nx - max(di, 0)]
+        b = idx[dj:ny, max(di, 0):nx - max(-di, 0)]
+        ca = cost[0:ny - dj, max(-di, 0):nx - max(di, 0)]
+        cb = cost[dj:ny, max(di, 0):nx - max(-di, 0)]
+        ok = (a >= 0) & (b >= 0)
+        rows.append(a[ok])
+        cols.append(b[ok])
+        wts.append(w * 0.5 * (ca[ok] + cb[ok]))
+    g = csr_matrix((np.concatenate(wts), (np.concatenate(rows), np.concatenate(cols))), shape=(len(js), len(js)))
+    dist, pred = dijkstra(g, directed=False, indices=int(si), return_predecessors=True)
+    if not np.isfinite(dist[ti]):
+        return None
+    path, u = [], int(ti)
+    while u >= 0 and u != si:
+        path.append((int(js[u]), int(is_[u])))
+        u = int(pred[u])
+    path.append((int(js[si]), int(is_[si])))
+    return path[::-1]
+
+
+# THE PACK'S MEASURE of a lane: its length + PULL x the integral of its distance from the bus's copper inside it, a
+# distance counted to REACH (a gap wider than that is room another track can use already: a lane far from the bus is
+# not dragged in to it, and the lanes beside it pack on it) -- a mm of copper against PULL mm2 of room between it and
+# the bus: packing and length weighed in one number, which the jump's way minimises and every kept move lowers
+PULL = float(awx_settings.get('PACK_PULL', '0.5'))
+REACH = float(awx_settings.get('PACK_REACH', '1.0'))    # (mm) a distance counts to this: a gap wider is room already
+JUMP_EPS = 0.02               # (mm of the measure) a jumped run must lower it by more than this
+JUMP_LONGER = 1.5             # (the old pack's taut retry, PACK_JUMP=0, is no part of the jump's)
+JUMP_ITERS = 10               # a lane's jumps, again until none moves it, at most this many
+
+
+def jump_string(P, cls, Ds, Cs, layers, Tn):
+    """THE JUMP, toward the bus's inside: each run of a lane's string -- a stretch on one layer between two fixed
+    points, a via or the lane's end FREEZE in from its pad -- laid first ALONGSIDE ITS INNER NEIGHBOUR (Tn: per layer
+    the copper (x0, y0, x1, y1) of the lane packed before it on the bus's centre side, empty where none), on whichever
+    side of every pad, via and track that takes it: the relaxation after it pulls a string taut and toward its
+    neighbour in the homotopy it is given (a point never jumps an obstacle), so a run the router laid on the far side
+    of a pad from its neighbour stays there without it, the room between them wasted. The way is the CHEAPEST path
+    through the free room of the run's layer by THE PACK'S MEASURE -- a cell's price 1 + PULL x its distance from the
+    neighbour's copper: length and room weighed in one number, so near an array a lane takes the diagonal to its
+    entrance rather than running along the face beside its neighbour -- the free room the relaxation's own model (Ds,
+    Cs: each layer's discs and capsules at a track's radii), on a raster of JUMP_CELL within JUMP_REACH of the run, the
+    run's own copper free in it. Taken where it lowers the run's measure by more than JUMP_EPS. The vias stay where
+    they are (the relaxation moves them after), and the emitted copper is validated as every packed lane's is.
+    Returns (P, cls, runs jumped, the measure they lost, summed)"""
+    from scipy import ndimage
+    n = len(P)
+    if n < 4:
+        return P, cls, 0, 0.0
+    arc = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(P[:, 0]), np.diff(P[:, 1])))])
+    cuts = [0] + [i for i in range(1, n - 1) if cls[i] == VIA] + [n - 1]
+    newP, newC = [P[0]], [cls[0]]
+    n_j, gain = 0, 0.0
+    for a, b in zip(cuts, cuts[1:]):
+        s_, e_ = a, b
+        if a == 0:
+            while s_ < b and arc[s_] < FREEZE:
+                s_ += 1
+        if b == n - 1:
+            while e_ > s_ and arc[-1] - arc[e_] < FREEZE:
+                e_ -= 1
+        li = next((int(c_) for c_ in cls[a + 1:b] if c_ != VIA), int(cls[a]) if cls[a] != VIA else -1)
+        done = False
+        T = Tn[li] if 0 <= li < len(Tn) else np.zeros((0, 4))
+        Q = P[s_:e_ + 1]
+        if len(T) and e_ - s_ >= 3:
+            x0, y0 = Q[:, 0].min() - JUMP_REACH, Q[:, 1].min() - JUMP_REACH
+            x1, y1 = Q[:, 0].max() + JUMP_REACH, Q[:, 1].max() + JUMP_REACH
+            # (the neighbour's copper in the run's room: none there, no jump)
+            T = T[(np.maximum(T[:, 0], T[:, 2]) >= x0) & (np.minimum(T[:, 0], T[:, 2]) <= x1)
+                  & (np.maximum(T[:, 1], T[:, 3]) >= y0) & (np.minimum(T[:, 1], T[:, 3]) <= y1)]
+        if len(T) and e_ - s_ >= 3 and 0 <= li < len(layers):
+            w_, h_ = x1 - x0, y1 - y0
+            h = max(JUMP_CELL, math.sqrt(w_ * h_ / JUMP_CELLS))
+            nx, ny = int(math.ceil(w_ / h)), int(math.ceil(h_ / h))
+            free = _free_raster(Ds[li], Cs[li], x0, y0, nx, ny, h)
+            # (the neighbour's copper on the raster, and every cell's distance from it)
+            nb = np.zeros((ny, nx), dtype=bool)
+            for ax_, ay_, bx_, by_ in T:
+                m_ = max(2, int(math.hypot(bx_ - ax_, by_ - ay_) / (h / 2)) + 1)
+                t_ = np.linspace(0.0, 1.0, m_)
+                ii = ((ax_ + (bx_ - ax_) * t_ - x0) / h).astype(int)
+                jj = ((ay_ + (by_ - ay_) * t_ - y0) / h).astype(int)
+                ok_ = (ii >= 0) & (ii < nx) & (jj >= 0) & (jj < ny)
+                nb[jj[ok_], ii[ok_]] = True
+            dist = np.minimum(ndimage.distance_transform_edt(~nb) * h, REACH)
+            # (the run's own copper is legal where it stands: its cells free, its ends' among them)
+            for p_, q_ in zip(Q, Q[1:]):
+                m_ = max(2, int(math.hypot(q_[0] - p_[0], q_[1] - p_[1]) / (h / 2)) + 1)
+                t_ = np.linspace(0.0, 1.0, m_)
+                ii = np.clip(((p_[0] + (q_[0] - p_[0]) * t_ - x0) / h).astype(int), 0, nx - 1)
+                jj = np.clip(((p_[1] + (q_[1] - p_[1]) * t_ - y0) / h).astype(int), 0, ny - 1)
+                free[jj, ii] = True
+
+            def cell(p_):
+                return (min(max(int((p_[1] - y0) / h), 0), ny - 1), min(max(int((p_[0] - x0) / h), 0), nx - 1))
+            path = _weighted_path(free, 1.0 + PULL * dist, cell(Q[0]), cell(Q[-1]))
+            if path is not None and len(path) >= 2:
+                # (the path's cells pulled by sight UNDER THE MEASURE: a chord for a stretch of the path where it is
+                # clear and costs no more than the stretch -- a staircase straightened, a cut away from the
+                # neighbour that saves less length than it costs in room refused)
+                cells = [tuple(Q[0])] + [(x0 + (i_ + 0.5) * h, y0 + (j_ + 0.5) * h) for j_, i_ in path[1:-1]] \
+                    + [tuple(Q[-1])]
+                way = _pulled_by_measure(cells, free, dist, x0, y0, h)
+
+                def measure(pts_):
+                    # (the pack's measure of a polyline: its length + PULL x its distance from the neighbour's
+                    # copper, integrated every half cell)
+                    e_ = 0.0
+                    for p_, q_ in zip(pts_, pts_[1:]):
+                        L_ = math.hypot(q_[0] - p_[0], q_[1] - p_[1])
+                        m_ = max(2, int(L_ / (h / 2)) + 1)
+                        t_ = np.linspace(0.0, 1.0, m_)
+                        ii = np.clip(((p_[0] + (q_[0] - p_[0]) * t_ - x0) / h).astype(int), 0, nx - 1)
+                        jj = np.clip(((p_[1] + (q_[1] - p_[1]) * t_ - y0) / h).astype(int), 0, ny - 1)
+                        e_ += L_ * (1.0 + PULL * float(dist[jj, ii].mean()))
+                    return e_
+                dw, do = measure(way), measure([tuple(q_) for q_ in Q])
+                if dw < do - JUMP_EPS:
+                    # (the run before s_ and after e_ as it was; the way between, a point every STEP)
+                    for k_ in range(a + 1, s_ + 1):
+                        newP.append(P[k_])
+                        newC.append(cls[k_])
+                    for p_, q_ in zip(way, way[1:]):
+                        m_ = max(1, int(math.ceil(math.hypot(q_[0] - p_[0], q_[1] - p_[1]) / STEP)))
+                        for k_ in range(1, m_ + 1):
+                            newP.append((p_[0] + (q_[0] - p_[0]) * k_ / m_, p_[1] + (q_[1] - p_[1]) * k_ / m_))
+                            newC.append(li)
+                    newP[-1], newC[-1] = P[e_], cls[e_]
+                    for k_ in range(e_ + 1, b + 1):
+                        newP.append(P[k_])
+                        newC.append(cls[k_])
+                    n_j += 1
+                    gain += do - dw
+                    done = True
+        if not done:
+            for k_ in range(a + 1, b + 1):
+                newP.append(P[k_])
+                newC.append(cls[k_])
+    if not n_j:
+        return P, cls, 0, 0.0
+    return np.asarray(newP, dtype=float), np.asarray(newC, dtype=int), n_j, gain
+
+
 def lane_string(pts, lays, layers):
     """A chained lane as a string: points every STEP with a class per
     point (the layer index of the piece it lies on; VIA at a vertex
@@ -1750,6 +2000,33 @@ def pack_order(c, lanes, settled_T, layers, log):
     across = [nm for nm in c.target if nm in lanes]
     if not across:
         return []
+    if JUMP and CENTRE == 'geo':
+        # (THE JUMP's order: by each lane's distance from THE BUS'S CENTRE LINE -- from its lanes' source ends' mean
+        # to their destination ends' mean -- the nearest first, each packed against the bus copper packed before it:
+        # the bus drawn in on itself, from its middle out, its room left at both its sides)
+        S_ = np.mean([c.ctx.ends[nm][0] for nm in across], axis=0)
+        D_ = np.mean([c.ctx.ends[nm][1] for nm in across], axis=0)
+        u_ = (D_ - S_) / max(float(np.hypot(*(D_ - S_))), 1e-9)
+        off = {}
+        for nm in across:
+            ss = lanes[nm][0]
+            w_ = np.array([math.hypot(s_.end_x - s_.start_x, s_.end_y - s_.start_y) for s_ in ss]) + 1e-9
+            mx = np.array([(s_.start_x + s_.end_x) / 2 for s_ in ss]) - S_[0]
+            my = np.array([(s_.start_y + s_.end_y) / 2 for s_ in ss]) - S_[1]
+            off[nm] = float(abs(np.sum(w_ * (mx * -u_[1] + my * u_[0])) / np.sum(w_)))
+        order = sorted(across, key=lambda nm: (off[nm], across.index(nm)))
+        log(f'  pack: from the bus\'s centre line out (({S_[0]:.2f}, {S_[1]:.2f}) -> ({D_[0]:.2f}, {D_[1]:.2f})), '
+            f'first {order[0]} {off[order[0]]:.2f} mm off it, last {order[-1]} {off[order[-1]]:.2f} mm')
+        return order
+    if JUMP:
+        # (THE JUMP's order by the bus's order: its centre lane first, then a lane each side in turn outward, each packed
+        # toward the centre against its inner neighbour in that order)
+        m = (len(across) - 1) // 2
+        order = [across[m]]
+        for k in range(1, len(across)):
+            order += [across[i] for i in (m - k, m + k) if 0 <= i < len(across)]
+        log(f'  pack: centre out from {across[m]}, each lane toward the centre')
+        return order
     if len(across) < 3:
         order = across
     else:
@@ -1779,6 +2056,65 @@ def pack_order(c, lanes, settled_T, layers, log):
         log(f'  pack: room outside {across[0]} {room[0]:.2f} mm, outside {across[-1]} '
             f'{room[1]:.2f} mm -> first {order[0]}')
     return order
+
+
+STILL = 0.02                  # (mm) a lane whose copper moved less than this in a pass stands still
+PASSES = 32                   # the whole pack's passes, again until no lane moves (a guard against a cycle only)
+
+
+def _moved(old, new):
+    """how far a lane's copper moved: the larger of the farthest point of `new` from `old` and of `old` from `new`
+    (segments, points every 0.1 mm)"""
+    def pts(ss):
+        out = []
+        for s_ in ss:
+            n = max(2, int(math.hypot(s_.end_x - s_.start_x, s_.end_y - s_.start_y) / 0.1) + 1)
+            t = np.linspace(0.0, 1.0, n)
+            out.append(np.stack([s_.start_x + (s_.end_x - s_.start_x) * t, s_.start_y + (s_.end_y - s_.start_y) * t], 1))
+        return np.concatenate(out) if out else np.zeros((0, 2))
+
+    def segs(ss):
+        return np.array([(s_.start_x, s_.start_y, s_.end_x, s_.end_y) for s_ in ss], dtype=float).reshape(-1, 4)
+    if not old or not new:
+        return math.inf
+    a_, b_ = pts(new), pts(old)
+    d1 = _nearest_on_segments(a_, segs(old))[0].max() if len(a_) else 0.0
+    d2 = _nearest_on_segments(b_, segs(new))[0].max() if len(b_) else 0.0
+    return float(max(d1, d2))
+
+
+def _measure(ss, T):
+    """THE PACK'S MEASURE of segments `ss`: their length + PULL x the integral of each one's distance (points every
+    0.1 mm) from T ({layer: segments (n, 4)}, its own layer's) -- a segment whose layer has none counts its length"""
+    e = 0.0
+    for s_ in ss:
+        L_ = math.hypot(s_.end_x - s_.start_x, s_.end_y - s_.start_y)
+        e += L_
+        T_ = T.get(s_.layer)
+        if T_ is None or not len(T_) or L_ <= 0:
+            continue
+        n = max(2, int(L_ / 0.1) + 1)
+        t = np.linspace(0.0, 1.0, n)
+        P_ = np.stack([s_.start_x + (s_.end_x - s_.start_x) * t, s_.start_y + (s_.end_y - s_.start_y) * t], 1)
+        e += PULL * L_ * float(np.minimum(_nearest_on_segments(P_, T_)[0], REACH).mean())
+    return e
+
+
+def pack_until_still(c, log, tag=''):
+    """THE WHOLE PACK AGAIN UNTIL NO LANE MOVES: pack_corridor pass after pass, each against the board the pass before
+    left -- a lane packed early beside a neighbour that then moved packs again against where it went -- until no lane's
+    copper moved more than STILL in a pass, or PASSES passes. Returns (lanes packed in the last pass, lanes, passes)"""
+    got = (0, 0)
+    for k in range(1, PASSES + 1):
+        before = {nm: list(c.out_segs.get(nm) or []) for nm in c.members}
+        got = pack_corridor(c, log, tag=f'{tag} pass {k}')
+        mv = {nm: _moved(before[nm], list(c.out_segs.get(nm) or [])) for nm in before}
+        moving = sorted((d, nm) for nm, d in mv.items() if d > STILL)
+        log(f'  PACK{tag} pass {k}: {len(moving)} lane(s) moved more than {STILL} mm'
+            + (f' (most {moving[-1][1]} {moving[-1][0]:.3f} mm)' if moving else ' -- the pack stands still'))
+        if not moving:
+            return got[0], got[1], k
+    return got[0], got[1], PASSES
 
 
 def pack_corridor(c, log, pitch=None, window=None, tag=''):
@@ -1843,11 +2179,41 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
     why = {}
     packed = []
 
-    def pack_one(nm, follow=True):
+    # THE INNER SIDE (the jump's order, centre_out): a lane's neighbours toward the bus's centre, nearest first
+    across_ = [nm for nm in c.target if nm in lanes]
+    pos_ = {nm: i for i, nm in enumerate(across_)}
+
+    def pred_of(nm, L, before, P=None):
+        """the lane `nm` packs against on layer L: packed before it (`before`) with copper on L -- the nearest
+        on its INNER side, toward the bus's centre, where the jump packs the bus centre out (from its centre line: the
+        packed lane whose copper on L comes nearest the string P; by the bus's order: the nearest inner one in it);
+        else the one packed just before it"""
+        if JUMP and CENTRE == 'geo' and P is not None:
+            best = None
+            for om in before:
+                T_ = np.array([(s.start_x, s.start_y, s.end_x, s.end_y) for s in lanes[om][0] if s.layer == L],
+                              dtype=float).reshape(-1, 4)
+                if len(T_):
+                    d_ = float(_nearest_on_segments(P, T_)[0].min())
+                    if best is None or d_ < best[0]:
+                        best = (d_, om)
+            return best[1] if best else None
+        if JUMP and nm in pos_:
+            i, m2 = pos_[nm], len(across_) - 1
+            inner = across_[i + 1:] if 2 * i < m2 else across_[:i][::-1] if 2 * i > m2 else []
+            return next((om for om in inner if om in before and any(s.layer == L for s in lanes[om][0])), None)
+        return next((om for om in reversed(before) if any(s.layer == L for s in lanes[om][0])), None)
+
+    jumps = {}                  # lane -> (its runs jumped, mm nearer their neighbour), lanes kept so
+    tried_jump = set()          # lanes whose last pack laid a jumped run
+
+    def pack_one(nm, follow=True, jump=True):
         """Pack lane `nm` against the board as it stands; with `follow`
-        False the string hugs nothing and only goes taut. Returns a
+        False the string hugs nothing and only goes taut; with `jump`
+        False its runs keep their way round (jump_string). Returns a
         reason string when the lane is not kept."""
         nonlocal n_packed, n_oct, n_runs
+        tried_jump.discard(nm)
         nid, net = ctx.byname[nm]
         segs, vias = lanes[nm]
         pts, lays, objs, left = chain_segs(segs, ctx.ends[nm][0])
@@ -1895,6 +2261,39 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
                     log(f'    pack {nm}: landing moved to stub vertex {vi_} ({v_[0]:.3f},{v_[1]:.3f}), '
                         f'{_d:.2f} mm from the approach instead of {poly_len(pts[ka:]) if False else 0:.2f}')
         P, cls = lane_string(pts, lays, layers)
+        worlds = [world_of(L, nid) for L in layers]
+        j_info = None
+        # THE PREDECESSOR, PER LAYER (pred_of): the lane it packs against there
+        before = order[:order.index(nm)]
+        preds = [pred_of(nm, L, before, P) for L in layers]
+        if JUMP and jump:
+            # THE JUMP: each run laid first alongside its inner neighbour, whichever side of an obstacle that takes
+            # it (jump_string) -- from the bus's centre line, every lane packed before it: the bus's copper inside it
+            arr_ = [w.arrays(MARGIN_R) for w in worlds]
+            if CENTRE == 'geo' and STACK:
+                # (...on EVERY layer, PACK_STACK: a run is drawn under or over the bus's copper on the other layers as
+                # beside its own -- the bus stacked, its footprint the least; the obstacles are its own layer's alone)
+                allT = np.array([(s.start_x, s.start_y, s.end_x, s.end_y) for om in before for s in lanes[om][0]
+                                 if s.layer in layers], dtype=float).reshape(-1, 4)
+                Tn_ = [allT for _L in layers]
+            elif CENTRE == 'geo':
+                # (...on its own layer: a run is drawn beside the bus's copper there)
+                Tn_ = [np.array([(s.start_x, s.start_y, s.end_x, s.end_y) for om in before for s in lanes[om][0]
+                                 if s.layer == L], dtype=float).reshape(-1, 4) for L in layers]
+            else:
+                Tn_ = [np.array([(s.start_x, s.start_y, s.end_x, s.end_y) for s in (lanes[pn][0] if pn else ())
+                                 if s.layer == L], dtype=float).reshape(-1, 4) for pn, L in zip(preds, layers)]
+            # (...AGAIN until no run moves: each jump's room is JUMP_REACH round the run where it then stands, so a
+            # lane far from its neighbour closes on it a jump at a time; each one nearer, so it ends)
+            n_j_, g_ = 0, 0.0
+            for _it in range(JUMP_ITERS):
+                P, cls, nj1, g1 = jump_string(P, cls, [a_ for a_, _c in arr_], [c_ for _a, c_ in arr_], layers, Tn_)
+                if not nj1:
+                    break
+                n_j_, g_ = n_j_ + nj1, g_ + g1
+            if n_j_:
+                j_info = (n_j_, g_)
+                tried_jump.add(nm)
         own_vias = {}
         anchors = [tuple(pts[0]), tuple(pts[-1])]
         for i in np.nonzero(cls == VIA)[0]:
@@ -1903,7 +2302,6 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
                 own_vias[int(i)] = hit[0]
             else:
                 anchors.append((float(P[i, 0]), float(P[i, 1])))
-        worlds = [world_of(L, nid) for L in layers]
         wvia = worlds[0].grown(via_extra, via_r - br.TRACK / 2)
         for w in worlds[1:]:
             wvia = World.union(wvia, w.grown(via_extra, via_r - br.TRACK / 2))
@@ -1947,13 +2345,11 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
         # lane relative to it (its planned centreline against the
         # predecessor's), which the packed copper cannot confuse; the
         # copper's own reading when the plan has no lines
-        before = order[:order.index(nm)]
         pl = getattr(c, 'lane_xy', {})
         T_pred, side = [], []
         empty = np.zeros((0, 4))
         for ci_, L in enumerate(layers):
-            pn = next((om for om in reversed(before)
-                       if any(s.layer == L for s in lanes[om][0])), None)
+            pn = preds[ci_]
             T = np.array([(s.start_x, s.start_y, s.end_x, s.end_y)
                           for s in (lanes[pn][0] if pn else ()) if s.layer == L],
                          dtype=float).reshape(-1, 4)
@@ -1982,8 +2378,14 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
             Ts = [np.zeros((0, 4)) for _ in Ts]
             T_pred = [np.zeros((0, 4)) for _ in T_pred]
         P0_ = P.copy()
-        P, rounds, _hug = relax_lane(P, cls, anchors, Ds, Cs, Ts, pitch, window, side=side,
-                                     Tp=T_pred, window_pred=WINDOW_PRED)
+        if j_info:
+            # (a JUMPED lane is its way as the measure laid it -- every run's shape, packing against length, the
+            # measure's own; the relaxation's follow would snap it on its neighbour from the first point clear of its
+            # pad, a comb along the array's face: it goes to the emitter as it stands)
+            rounds, _hug = 0, np.zeros(len(P), dtype=bool)
+        else:
+            P, rounds, _hug = relax_lane(P, cls, anchors, Ds, Cs, Ts, pitch, window, side=side,
+                                         Tp=T_pred, window_pred=WINDOW_PRED)
         if nm in DUMP:
             # per point: the nearest settled segment on its layer (predecessor
             # first, then the rest) and the distance -- what a hug point holds
@@ -2004,6 +2406,10 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
         for a_ in anchors:
             free_ &= np.hypot(P[:, 0] - a_[0], P[:, 1] - a_[1]) >= FREEZE
         folds[nm] = int((_fold & free_ & (cls != VIA)).sum())
+        if j_info and folds[nm]:
+            # (a jumped string that FOLDS -- a run each side of a via drawn to the bus from opposite sides, the lane
+            # looping round its own via -- is not kept: pack_jumped packs the lane again with its way round kept)
+            return f'jump folds {folds[nm]}'
         models = [(_as_caps(*tf._near(Ds[i], Cs[i], P)), _chords_of(_near_T(Ts[i], P)))
                   for i in range(len(layers))]
         runs, new_vias = emit_lane(P, cls, layers, models, worlds)
@@ -2014,7 +2420,8 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
         if any(len(q) < 2 for _L, q in runs) or runs[0][1][0] != tuple(pts[0]) \
                 or runs[-1][1][-1] != tuple(pts[-1]):
             return 'ends moved'
-        if L1 > L0 * 1.1 + 0.3:
+        if not (JUMP and CENTRE == 'geo') and L1 > L0 * 1.1 + 0.3:
+            # (the jump's pack weighs length in its measure, below, and has no bound of its own)
             return f'longer {L0:.2f} -> {L1:.2f}'
         for L, q in runs:
             pieces = [(a_[0], a_[1], b_[0], b_[1]) for a_, b_ in zip(q, q[1:])]
@@ -2047,6 +2454,17 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
                     return 'self-crossing'
         new_segs = [Segment(a_[0], a_[1], b_[0], b_[1], br.TRACK, L, nid)
                     for L, q in runs for a_, b_ in zip(q, q[1:])]
+        if JUMP and CENTRE == 'geo':
+            # THE PACK'S MEASURE, which every move must better (so the passes end): the lane's mean distance from
+            # the bus's copper packed before it -- every layer's with PACK_STACK, else each piece's own layer's --
+            # nearer by more than STILL, or the lane STANDS as it was; a lane with nothing inside it (the centre
+            # lane) moves only to be shorter
+            Tref = {L: np.array([(s.start_x, s.start_y, s.end_x, s.end_y) for om in before for s in lanes[om][0]
+                                 if (s.layer in layers if STACK else s.layer == L)], dtype=float).reshape(-1, 4)
+                    for L in layers}
+            J0, J1 = _measure(segs, Tref), _measure(new_segs, Tref)
+            if J1 > J0 - STILL:
+                return f'stands (its measure {J0:.2f} -> {J1:.2f})'
         moved_vias = []
         for (x, y), i in zip(new_vias, [i for i in range(1, len(P) - 1) if cls[i] == VIA]):
             old = own_vias.get(int(i))
@@ -2063,6 +2481,10 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
         kept_vias = [v for v in vias if id(v) not in old_via_ids] + [v for _o, v in moved_vias]
         lanes[nm] = (new_segs, kept_vias)
         n_packed += 1
+        if j_info:
+            jumps[nm] = j_info
+        else:
+            jumps.pop(nm, None)
         p1 = {L: _pitch_stat(q, Tall[L]) for L, q in runs}
         for L in layers:
             if p0.get(L) is not None:
@@ -2095,21 +2517,37 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
     # settles into nested curves that bend where the obstacle is, where the
     # follow copies the neighbour's jog wherever it happens to be
     _follow = awx_settings.get('PK_FOLLOW', '1') != '0'
+    def pack_jumped(nm, follow):
+        """pack_one, and once more with its runs' way round kept when
+        the jumped string's copper was refused"""
+        r_ = pack_one(nm, follow=follow)
+        if r_ is not None and not r_.startswith('stands') and nm in tried_jump:
+            r2_ = pack_one(nm, follow=follow, jump=False)
+            if r2_ is None or not r2_.startswith('longer') or r_.startswith('longer'):
+                return r2_
+        return r_
+
     for nm in order:
         n_lanes += 1
-        reason = pack_one(nm, follow=_follow)
+        reason = pack_jumped(nm, _follow)
         if reason is not None and reason.startswith('longer'):
             # the follow would drag the lane onto a longer arc (packing
             # toward the roomy side pulls an inner lane out onto the outer
             # lane's detour): the lane goes TAUT instead, hugging nothing --
             # still re-emitted clean, and what packs after it hugs a line,
             # not the router's staircase
-            r2 = pack_one(nm, follow=False)
+            r2 = pack_jumped(nm, False)
             if r2 is None:
                 n_taut += 1
                 reason = None
             elif DEBUG:
                 log(f'    pack {nm}: taut retry NOT KEPT ({r2})')
+        if reason is not None and reason.startswith('stands') and _follow:
+            # (...and where hugging its neighbour does not lower it, the lane TAUT, which may)
+            if pack_jumped(nm, False) is None:
+                n_taut += 1
+        if reason is not None and reason.startswith('stands'):
+            reason = None                   # (the pack's measure not bettered: the lane stands as it was)
         if reason is not None:
             failed.append(nm)
             if DEBUG:
@@ -2117,10 +2555,10 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
         packed.append(nm)
     still = []
     for nm in failed:
-        reason = pack_one(nm, follow=_follow)
+        reason = pack_jumped(nm, _follow)
         if reason is not None and reason.startswith('longer'):
-            reason = pack_one(nm, follow=False)
-        if reason is not None:
+            reason = pack_jumped(nm, False)
+        if reason is not None and not reason.startswith('stands'):
             still.append(nm)
             why[reason.split()[0]] = why.get(reason.split()[0], 0) + 1
             log(f'    pack {nm}: NOT KEPT on the retry ({reason})')
@@ -2133,7 +2571,7 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
     for nm in order:
         if nm in still or folds.get(nm, 0) == 0:
             continue
-        if pack_one(nm) is None:
+        if pack_jumped(nm, True) is None:
             n_fold += 1
     if still:
         log(f'  PACK{tag}: {len(still)} lane(s) keep the router\'s copper: {", ".join(still)}')
@@ -2151,7 +2589,9 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
         f'{n_arc[0]} wraps as chamfers, {n_rep[0]} legs repaired any-angle; '
         f'pitch {pitch:.3f}, window {window:.1f}); '
         f'lane length {tot0:.1f} -> {tot1:.1f} mm; '
-        f'median neighbour distance {med0} -> {med1} mm'
+        + (f'{sum(v[0] for v in jumps.values())} run(s) of {len(jumps)} lane(s) jumped toward their inner '
+           f'neighbour, their measure {sum(v[1] for v in jumps.values()):.2f} lower; ' if jumps else '')
+        + f'median neighbour distance {med0} -> {med1} mm'
         + (f'; not kept: {", ".join(f"{k} {v}" for k, v in sorted(why.items()))}' if why else '')
         + f'  ({_time.time() - t0:.1f} s)')
     return n_packed, n_lanes

@@ -239,7 +239,11 @@ def main(argv=None):
     was = {n: {id(s) for s in c.out_segs[n]} for n in target}
     print(f'pack: {len(target)} single lane(s) in {how} order, on {len(layers)} routing layer(s)')
     if target:
-        pack.pack_corridor(c, print)
+        if pack.JUMP:
+            # (the jump's pack: again until no lane moves -- pack.pack_until_still)
+            pack.pack_until_still(c, print)
+        else:
+            pack.pack_corridor(c, print)
     now_s, now_v = {id(s) for s in ctx.pcb.segments}, {id(v) for v in ctx.pcb.vias}
     old_s = [orig[id(s)] for s in add_s if id(s) not in now_s]
     old_v = [orig[id(v)] for v in add_v if id(v) not in now_v]

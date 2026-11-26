@@ -166,6 +166,9 @@ NEAR_EXITS = 16.0
 # priced with the changes of layer, this many vias. Nothing ranked a drop above a fan-out, and 35 of a board's 153
 # plane balls on its bus chips were left fanned out, joined to no plane
 PLANE_FAN = 100.0
+# EACH BUS ITS PREFERRED LAYERS (the setting GROUP_PREFER, "an end off them, a layer more, a layer two buses both
+# prefer", in vias; unset: no such terms): prefer_rows
+PREFER_OFF = 'GROUP_PREFER'
 STRAP_VIAS = 2.0    # a strap, in vias: more than the drop it does without (1), so a drop is taken where one fits
 # an exit's FRONT read this far (mm): its straight way out clear past the solve's no-change zone and a via's room --
 # at the ends model's own 1.2 a pair left on the back layer 2 mm short of a part's pad, no room to change before it
@@ -1394,6 +1397,50 @@ def way_of(g0, L):
     given it (wayout_runs), or None where its exit has no direction"""
     w = wayout_runs([(0, tuple(g0.exit_pt), g0.direction, L)], [L])
     return ((w[0]['start'], w[0]['end']), w[0]['width']) if w else None
+
+
+def prefer_rows(m, buses, NL, pk):
+    """EACH BUS ITS PREFERRED LAYERS, chosen with its ends: a hand keeps each bus of a board largely to layers of its
+    own where the buses share ground, a small bus to one -- and buses whose lanes spread over one another's layers
+    take one another's ways: a header's lanes on the inner signal layer along an array's face stood in the corridor
+    a memory bus's address lanes go straight down, and those went round the array. For each bus a set of the
+    SIGNAL layers (the routing layers no plane fills: `pk`, a layer's plane price, 0 there) is chosen with the ends
+    (a boolean a layer): an end of the bus on a signal layer outside its set is priced, each layer of the set after
+    the first is priced, and a layer in the sets of two buses that share an array is priced by the smaller bus's
+    ends -- a preference the solve may leave where the ends are worth it, no layer forbidden to any bus. A plane's
+    layer is no bus's to prefer (an end there pays the plane's own price): offered them, a header bus preferred two
+    planes to keep off a memory bus's three signal layers. The prices: the setting GROUP_PREFER "an end off its
+    bus's layers, a layer more, a shared layer an end of the smaller bus", in vias. -> ({(bus, layer index): its
+    boolean}, the terms priced)"""
+    raw = awx_settings.get(PREFER_OFF)
+    sig = [q for q in range(NL) if not pk[q]]
+    if not raw or len(buses) < 2 or len(sig) < 2:
+        return {}, []
+    w_off, w_layer, w_same = (int(round(1000 * float(v_))) for v_ in raw.split(',')[:3])
+    prefs, terms, ends = {}, [], {}
+    for b in buses:
+        ends[b.name] = n_b = 2 * sum(b.J.npair[l_] for l_ in b.J.lanes)
+        ps_ = []
+        for q in sig:
+            p_ = prefs[b.name, q] = m.NewBoolVar(f'prefer_{b.name}_{q}')
+            ps_.append(p_)
+            # (a boolean an end: the objective's weights are read off its terms as booleans' -- the walled ball's)
+            for k_ in (0, 1):
+                for l_ in b.J.lanes:
+                    off_ = m.NewBoolVar('')
+                    m.AddBoolOr([b.J.y[k_][l_][q].Not(), p_, off_])
+                    terms.append(w_off * b.J.npair[l_] * off_)
+        m.Add(sum(ps_) >= 1)
+        terms.append(w_layer * (sum(ps_) - 1))
+    for a_, b_ in itertools.combinations(buses, 2):
+        if not any(x_ is not None and any(x_ is y_ for y_ in b_.arr) for x_ in a_.arr):
+            continue                    # (no array of their own in common: they share no ground at an end)
+        w_ = w_same * min(ends[a_.name], ends[b_.name])
+        for q in sig:
+            both_ = m.NewBoolVar('')
+            m.AddBoolOr([prefs[a_.name, q].Not(), prefs[b_.name, q].Not(), both_])
+            terms.append(w_ * both_)
+    return prefs, terms
 
 
 def join_runs(wayouts, layers, reach):
@@ -4680,6 +4727,9 @@ def main():
                             if b.E.PK[q] == 'gnd' and b.E.inner_signal:
                                 m.Add(b.J.y[k_][l_][q] == 0).OnlyEnforceIf(
                                     gate('ground', b.name, l_, k_, lanes={(b.name, l_, k_)}))
+            # EACH BUS ITS PREFERRED LAYERS (prefer_rows): priced with the terms between buses
+            prefers, pt_ = prefer_rows(m, buses, NL, pk)
+            between_cost = between_cost + pt_
             log(f'  round {rnd}: the model {len(m.Proto().variables)} variables, {len(m.Proto().constraints)} rows, '
                 f'{n_reg} regions\' rules ({time.time() - t0:.0f} s)')
             # ---- a state at all? Every rule assumed: with none, the rules that cannot hold together are named
@@ -5702,13 +5752,20 @@ def main():
                             'legs': [[list(a_), list(b_), (L_ if Lg == je.RUN else Lg)] for a_, b_, Lg in g0.legs]}
             log(f'  {b.name}: {len(b.J.lanes)} lanes -- {nx} crossings, {nchg} changing layer, {vias} fanout vias\n'
                 f'      its teeth by face and layer: ' + ', '.join(f'{d} {L} {n}' for (d, L), n in sorted(ends[0].items()))
-                + '\n      its berths: ' + ', '.join(f'{d} {L} {n}' for (d, L), n in sorted(ends[1].items())))
+                + '\n      its berths: ' + ', '.join(f'{d} {L} {n}' for (d, L), n in sorted(ends[1].items()))
+                + ('\n      its preferred layers: ' + ', '.join(RL[q] for q in range(NL) if (b.name, q) in prefers
+                                                                  and sv.Value(prefers[b.name, q]))
+                   if prefers else ''))
             # (the bus's plan for its own step, bus_stage: in its frame, which two of the source's pads place -- frame)
             two = sorted(b.arr[0].pads)[:1] + sorted(b.arr[0].pads)[-1:]
             rep['buses'][b.name] = {
                 'state': {l_: [we._opt_sig(b.E.T[l_][s[l_][0]]), we._opt_sig(b.E.B[l_][s[l_][1]])] for l_ in b.J.lanes},
                 'crossings': int(nx), 'changes': int(nchg), 'vias': int(vias), 'src': sref, 'plan': b.plan,
                 'frame': {n_: list(b.G.pt(b.arr[0].pads[n_])) for n_ in two}}
+            if prefers:
+                # (the bus's preferred layers, for its own step's solve: whole_solve prices a run off them the same)
+                rep['buses'][b.name]['prefer'] = [RL[q] for q in range(NL) if (b.name, q) in prefers
+                                                  and sv.Value(prefers[b.name, q])]
             # (THE STATE, a trace's: each lane's two ends as chosen, its change, the lanes it crosses, and the ends
             # that moved since the state before -- this model's last, or the run's it started from)
             lanes_rec, moved_ = {}, {}

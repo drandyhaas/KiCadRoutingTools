@@ -114,6 +114,27 @@ W_SOFT = 3 * W_V                       # a broken SOFT cut: above a dive's two v
 #                                        vias dearer than one breaking it floored to the same whole number, proved)
 
 
+def _bus_prefer():
+    """(this bus's preferred layers, a run off them in vias, a mm of a run off them in vias) as its group's ends model
+    chose them (the group's group.json under GROUP_ENDS, its `prefer` for the bus JOINT_BUS; the run's price
+    GROUP_PREFER's first, an end's, twice: a run has two; the mm's its fourth, 0 where it gives none) -- None for a
+    bus alone, or a group that priced none"""
+    import json
+    import os
+    import awx_settings
+    raw, gd, bus = awx_settings.get('GROUP_PREFER'), awx_settings.get('GROUP_ENDS'), awx_settings.get('JOINT_BUS')
+    if not (raw and gd and bus):
+        return None
+    try:
+        buses = json.load(open(os.path.join(gd, 'group.json'))).get('buses') or {}
+    except (OSError, ValueError):
+        return None
+    key = lambda n_: n_.replace('+', '_')       # noqa: E731
+    pref = next((v_.get('prefer') for k_, v_ in buses.items() if key(k_) == key(bus)), None)
+    vals = [float(v_) for v_ in raw.split(',')]
+    return (tuple(pref), 2 * vals[0], vals[3] if len(vals) > 3 else 0.0) if pref else None
+
+
 def _plane_weights(ctx, LAYN):
     """(the plane tie, _plane_tie) each routing layer's price per step of a lane's run on it, for the PLANE it splits
     (route_layers.plane_kinds): a ground plane's dearer than a power plane's, a signal layer free -- and between planes
@@ -1153,6 +1174,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
     PL_IDX, PW_IDX = [], []
     PL_PRICE = [0] * NL         # (a run's flat price on each layer, in vias: a ground plane's, a power plane's)
     PW_MM = 0.0                 # (a power plane's run, in vias a mm)
+    PF_IDX, PF_MM = [], 0.0     # (a run off the bus's preferred layers, in vias a mm)
     if NL > 2:
         _w, kinds_ = _plane_weights(ctx, LAYN)
         if any(kinds_[L_] == '-' for L_ in LAYN):          # (every layer a plane's: no layer to keep them off)
@@ -1160,6 +1182,22 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
             in_ = route_layers.inner_signal(kinds_)
             PL_PRICE = [route_layers.gnd_run_vias(in_) if kinds_[L_] == 'gnd' else
                         route_layers.pwr_run_vias(in_) if kinds_[L_] == 'pwr' else 0.0 for L_ in LAYN]
+            # (THE BUS'S PREFERRED LAYERS, its group's choice -- group_ends.prefer_rows: a run on a signal layer
+            # outside them priced here as the group prices an end there. The group's split is where this solve
+            # starts, and its via ends' layers are this solve's to choose: unpriced, a memory bus that had left the
+            # back layer to a header in the group's model took it back in its own)
+            pf_ = _bus_prefer()
+            if pf_:
+                PL_PRICE = [pf_[1] if kinds_[L_] == '-' and L_ not in pf_[0] else PL_PRICE[i_]
+                            for i_, L_ in enumerate(LAYN)]
+                # (...AND BY ITS LENGTH, on every layer outside them: an array lets a lane out on the layer it has
+                # room on, and a lane left there for its whole length ran on a layer another bus had been left --
+                # a header's lanes on three inner layers round an array, each a fence to the memory lanes beside it.
+                # Priced by the mm, the lane changes to its bus's own layer where a via is cheaper than the run)
+                if pf_[2] > 0:
+                    PF_IDX, PF_MM = [i_ for i_, L_ in enumerate(LAYN) if L_ not in pf_[0]], pf_[2]
+                print(f'   the bus\'s preferred layers ({", ".join(pf_[0])}): a run on another signal layer '
+                      f'{pf_[1]:g} via(s)' + (f', a mm of a run on any other layer {PF_MM:g}' if PF_IDX else ''))
             PL_IDX = [i_ for i_ in range(NL) if PL_PRICE[i_] > 0]
             PW_MM = route_layers.pwr_vias_per_mm() if in_ else 0.0
             PW_IDX = [i_ for i_ in range(NL) if kinds_[LAYN[i_]] == 'pwr'] if PW_MM > 0 else []
@@ -1167,7 +1205,8 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
             print('   a run on a plane\'s layer priced: '
                   + ', '.join([f'{LAYN[i_]} ({kinds_[LAYN[i_]]}) {PL_PRICE[i_]:g} via(s) a run' for i_ in PL_IDX]
                               + [f'{LAYN[i_]} (pwr) {PW_MM:.3g} via(s) a mm' for i_ in PW_IDX]))
-    MM_GROUPS = [(PW_IDX, PW_MM)] if PW_IDX else []      # (the runs priced by their length: a power plane's)
+    # (the runs priced by their length: a power plane's, and one off the bus's preferred layers)
+    MM_GROUPS = ([(PW_IDX, PW_MM)] if PW_IDX else []) + ([(PF_IDX, PF_MM)] if PF_IDX else [])
     chg, tot = {}, {}
     CDOM = {}                 # each lane's change places: (first, last) in steps of G
     T0 = {c_[0] for c_ in LAYER_CUTS if c_[1] == 0} | CHAN_T0 | TVIA   # (a blocked tooth's change may stand in the face's band)
