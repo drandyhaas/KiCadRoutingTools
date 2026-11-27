@@ -5895,7 +5895,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                              dry_run: bool = False,
                              min_gain: float = 0.01,
                              max_net_segs: int = 400,
-                             max_chain_segs: int = 100):
+                             max_chain_segs: int = 100,
+                             smooth_large_nets: bool = False):
     """Collapse grid-A* staircase micro-jogs into octolinear shortcuts (#536).
 
     Walks each net's simple track chains (split at junctions, same-net vias,
@@ -5927,7 +5928,12 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         would hand that space back.
 
     Per net, the result is committed only if check_net_connectivity does not
-    grade it worse than the original. The guard runs WITHOUT pour credit:
+    grade it worse than the original: after every chain on a net of up to
+    max_net_segs segments. A net above that is skipped (nets_skipped_large),
+    unless smooth_large_nets: then it is checked once for the whole net (the
+    per-chain check is a full-net connectivity pass, so per chain it grows
+    with the square of the net; a net whose whole result grades worse keeps
+    its copper as it came). The guard runs WITHOUT pour credit:
     endpoints are preserved by construction, so the track/via/pad graph
     alone must not degrade -- raw zone-outline credit would mask a real
     track loss behind fill the refill may not produce.
@@ -6231,7 +6237,36 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     nets_changed = 0
     stats = {'nets': 0, 'nets_skipped_large': 0, 'chains': 0, 'spans': 0,
              'segs_removed': 0, 'segs_added': 0, 'saved_mm': 0.0,
-             'chains_reverted': 0}
+             'chains_reverted': 0, 'nets_large': 0, 'nets_reverted_large': 0}
+
+    def _commit(removed_chain, new_chain_segs, n_spans, gain):
+        """Count one smoothed chain and, unless dry_run, hand its copper to
+        the results. Returns the ids it removes (the caller splices)."""
+        stats['spans'] += n_spans
+        stats['segs_removed'] += len(removed_chain)
+        stats['segs_added'] += len(new_chain_segs)
+        stats['saved_mm'] += gain
+        if dry_run:
+            return None
+        res = None
+        for s in removed_chain:
+            if id(s) in routed_seg_result:
+                removed_ids.add(id(s))
+                res = res or routed_seg_result[id(s)]
+            else:
+                original_to_remove.append(s)
+        if res is None:
+            res = {'new_segments': [], 'new_vias': [],
+                   'cleanup': 'smooth_octolinear'}
+            results.append(res)
+        res['new_segments'] = list(res.get('new_segments') or []) + new_chain_segs
+        added_segments.extend(new_chain_segs)
+        return {id(s) for s in removed_chain}
+
+    def _splice(rm, added):
+        pcb_data.segments = [s for s in pcb_data.segments if id(s) not in rm] + added
+        if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+            pcb_data._foreign_seg_arr_cache = None
 
     # This pass edits copper only by SPLICING pcb_data.segments, and drops
     # the foreign-segment cache at every splice below, so between its own
@@ -6248,9 +6283,17 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
             net_segs = segs_by_net[net_id]
             if len(net_segs) < 2:
                 continue
-            if len(net_segs) > max_net_segs:
+            # Above max_net_segs a net is skipped, unless smooth_large_nets
+            # (--smooth-large-nets): then it is smoothed with ONE connectivity
+            # check for the whole net instead of one per chain (see _commit's
+            # callers below), so a power net tapping many pads does not ship
+            # its staircases.
+            large = len(net_segs) > max_net_segs
+            if large and not smooth_large_nets:
                 stats['nets_skipped_large'] += 1
                 continue
+            if large:
+                stats['nets_large'] += 1
             stats['nets'] += 1
             net_pads = pcb_data.pads_by_net.get(net_id, [])
             net_vias = vias_by_net.get(net_id, [])
@@ -6286,6 +6329,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
 
             before = None
             net_changed = False
+            pending = []      # a large net's chains, committed together at its end
             for (layer, w), gsegs in sorted(groups.items()):
                 if len(gsegs) < 2:
                     continue
@@ -6702,39 +6746,40 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                                             pcb_data=pcb_data)
                         _rm = {id(s) for s in removed_chain}
                         trial = [s for s in net_segs if id(s) not in _rm] + new_chain_segs
+                        if large:
+                            # checked once, for the whole net, below; the clearance
+                            # tests read foreign copper only, so this net's later
+                            # chains do not need the splice yet
+                            pending.append((removed_chain, new_chain_segs, len(spans), gain))
+                            net_segs = trial
+                            continue
                         if worse(before, check_net_connectivity(net_id, trial, net_vias,
                                                                 net_pads, [],
                                                                 pcb_data=pcb_data)):
                             stats['chains_reverted'] += 1
                             continue
-
-                        stats['spans'] += len(spans)
-                        stats['segs_removed'] += len(removed_chain)
-                        stats['segs_added'] += len(new_chain_segs)
-                        stats['saved_mm'] += gain
-                        if dry_run:
+                        rm = _commit(removed_chain, new_chain_segs, len(spans), gain)
+                        if rm is None:
                             continue
-
-                        res = None
-                        for s in removed_chain:
-                            if id(s) in routed_seg_result:
-                                removed_ids.add(id(s))
-                                res = res or routed_seg_result[id(s)]
-                            else:
-                                original_to_remove.append(s)
-                        if res is None:
-                            res = {'new_segments': [], 'new_vias': [],
-                                   'cleanup': 'smooth_octolinear'}
-                            results.append(res)
-                        res['new_segments'] = list(res.get('new_segments') or []) + new_chain_segs
-                        added_segments.extend(new_chain_segs)
                         # Splice pcb_data NOW, per commit (#508 finding 5): later
                         # chains/nets must see this one's copper at its new place.
-                        pcb_data.segments = [s for s in pcb_data.segments
-                                             if id(s) not in _rm] + new_chain_segs
-                        if hasattr(pcb_data, '_foreign_seg_arr_cache'):
-                            pcb_data._foreign_seg_arr_cache = None
+                        _splice(rm, new_chain_segs)
                         net_segs = trial
+                        net_changed = True
+            if pending:
+                if worse(before, check_net_connectivity(net_id, net_segs, net_vias,
+                                                        net_pads, [], pcb_data=pcb_data)):
+                    stats['nets_reverted_large'] += 1
+                    stats['chains_reverted'] += len(pending)
+                else:
+                    rm_all, added_all = set(), []
+                    for removed_chain, new_chain_segs, n_spans, gain in pending:
+                        rm = _commit(removed_chain, new_chain_segs, n_spans, gain)
+                        if rm is not None:
+                            rm_all |= rm
+                            added_all += new_chain_segs
+                    if rm_all:
+                        _splice(rm_all, added_all)
                         net_changed = True
             if net_changed:
                 nets_changed += 1

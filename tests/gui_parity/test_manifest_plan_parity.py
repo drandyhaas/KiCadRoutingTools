@@ -88,6 +88,7 @@ BOOL_FLAGS = {
     '--no-bga-zones': 'no_bga_zone', '--no-bga-zone': 'no_bga_zone',
     '--no-gnd-vias': 'no_gnd_vias', '--rip-blocker-nets': 'rip_blocker_nets',
     '--keep-input-copper': 'keep_input_copper',
+    '--smooth-large-nets': 'smooth_large_nets',
     # #860 follow-up: qfn_fanout's under-pad via-in-pad opt-in, which #846 made
     # consequential and which reached the GUI through nothing -- unregistered in
     # manifest_to_plan, so a recorded manifest replayed the step without it.

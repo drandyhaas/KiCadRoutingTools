@@ -408,6 +408,7 @@ EXTEND_LIST_FLAGS = {'--keep-away'}
 BOOL_FLAGS = {
     '--rip-blocker-nets': 'rip_blocker_nets',
     '--smoothing': 'smoothing',      # #536 octolinear smoothing (default ON)
+    '--smooth-large-nets': 'smooth_large_nets',   # nets above 400 segments too (default OFF)
     # (--no-smoothing is in INVERTED_BOOL_FLAGS below: it used to be here as
     # `no_smoothing`, a name no control or alias matched.)
     '--add-gnd-vias': 'add_gnd_vias',
