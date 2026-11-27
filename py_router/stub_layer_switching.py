@@ -524,17 +524,13 @@ def apply_bare_pad_target_via(pcb_data: PCBData, net_id: int, pad_x: float, pad_
 def relayer_width(seg, new_layer: str, config) -> float:
     """Width a segment must take when it moves to `new_layer`.
 
-    Per-layer rules (a .kicad_dru track_width scoped by layer, a per-layer
-    netclass/impedance width) can give a net different widths on different
-    layers. A layer move that kept the old width shipped 0.102 mm tracks on an
-    outer layer whose rule minimum is 0.18 mm and 0.18 mm tracks on inner
-    layers capped at 0.102 mm. When the net resolves the same width on both
-    layers the segment keeps its own width (neck-downs, diff-pair widths)."""
-    old_w = config.get_net_track_width(seg.net_id, seg.layer)
-    new_w = config.get_net_track_width(seg.net_id, new_layer)
-    if old_w is None or new_w is None or abs(old_w - new_w) < 1e-9:
-        return seg.width
-    return new_w
+    A .kicad_dru track_width rule scoped by layer can give a net a different
+    width window per layer. A layer move that kept the old width shipped
+    0.102 mm tracks on an outer layer whose rule minimum is 0.18 mm and 0.18 mm
+    tracks on inner layers capped at 0.102 mm. The segment keeps its own width
+    (neck-downs, fanout stubs, diff-pair widths), clamped into the destination
+    layer's rule window only: a net no rule binds is never resized."""
+    return config.rule_width_bounds(seg.net_id, new_layer, seg.width)
 
 
 def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_vias: List) -> None:

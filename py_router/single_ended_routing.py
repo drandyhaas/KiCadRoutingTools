@@ -8526,17 +8526,21 @@ def _neck_rule_min(config: GridRouteConfig, net_id: int, layer: str) -> float:
     --escalation fab, which may go below rule minimums (as
     config.rule_floors). Cached per (net, layer): the neck pass asks once per
     segment."""
-    cache = config.__dict__.setdefault('_neck_rule_min_cache', {})
+    from fab_tiers import get_escalation_policy
+    rules = config.rules
+    policy = get_escalation_policy()[0]
+    cache = config.__dict__.get('_neck_rule_min_cache')
+    if cache is None or cache.get('_rules') is not rules or cache.get('_policy') != policy:
+        cache = {'_rules': rules, '_policy': policy}
+        config.__dict__['_neck_rule_min_cache'] = cache
     key = (net_id, layer)
     v = cache.get(key)
     if v is None:
         v = 0.0
-        rules = config.rules
         if rules is not None and (getattr(rules, 'rules', None)
                                   or getattr(rules, 'board_min', None)):
             try:
-                from fab_tiers import get_escalation_policy
-                if get_escalation_policy()[0] != 'fab':
+                if policy != 'fab':
                     c = rules.resolve_for_copper(
                         'track_width', rules.item_for_net(net_id, 'track', layer),
                         None, layer)

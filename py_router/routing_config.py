@@ -624,7 +624,16 @@ class GridRouteConfig:
         if rules is None or not (getattr(rules, 'rules', None)
                                  or getattr(rules, 'board_min', None)):
             return w
-        cache = self.__dict__.setdefault('_rule_width_bounds_cache', {})
+        from fab_tiers import get_escalation_policy
+        policy = get_escalation_policy()[0]
+        cache = self.__dict__.get('_rule_width_bounds_cache')
+        # The bounds depend on the rules object and the escalation policy, both
+        # of which a caller may replace on a live config (install_design_rules,
+        # set_escalation_policy): a cache filled under other rules or another
+        # policy is dropped, not consulted.
+        if cache is None or cache.get('_rules') is not rules or cache.get('_policy') != policy:
+            cache = {'_rules': rules, '_policy': policy}
+            self.__dict__['_rule_width_bounds_cache'] = cache
         key = (net_id, layer)
         if key not in cache:
             lo = hi = None
@@ -632,18 +641,19 @@ class GridRouteConfig:
                 c = rules.resolve_for_copper(
                     'track_width', rules.item_for_net(net_id, 'track', layer),
                     None, layer)
-                lo, hi = c.min, c.max
-                from fab_tiers import get_escalation_policy
-                if get_escalation_policy()[0] == 'fab':
+                # KiCad's own minimum, not the fab tier's floor (as _neck_rule_min).
+                lo = c.kicad_min if c.fab_bound else c.min
+                hi = c.max
+                if policy == 'fab':
                     lo = None
             except Exception:                                  # noqa: BLE001
                 pass
             cache[key] = (lo, hi)
         lo, hi = cache[key]
-        if hi is not None and w > hi + 1e-9:
-            w = float(hi)
         if lo is not None and w < lo - 1e-9:
             w = float(lo)
+        if hi is not None and w > hi + 1e-9:      # the maximum binds last
+            w = float(hi)
         return w
 
     def track_floor(self, net_id: int, layer: Optional[str], fab_value: float) -> float:
