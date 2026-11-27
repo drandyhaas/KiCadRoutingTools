@@ -23,7 +23,7 @@ Invariants gated here:
      width (relayer_width).
 
 Run:
-    python3 tests/test_NNNN_layer_switch_rule_width.py
+    python3 tests/test_2084_layer_switch_rule_width.py
 """
 
 import os
@@ -38,7 +38,11 @@ sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))
 from kicad_parser import PCBData, Segment, Pad, Net
 from routing_config import GridRouteConfig
 from stub_layer_switching import (StubInfo, apply_stub_layer_switch,
-                                  revert_stub_layer_switch, relayer_width)
+                                  revert_stub_layer_switch)
+try:
+    from stub_layer_switching import relayer_width
+except ImportError:  # before the fix: no destination-width helper
+    relayer_width = None
 from kicad_writer import modify_segment_layers
 
 LAYERS = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
@@ -112,7 +116,8 @@ def main():
 
     print("3: same width on both layers keeps the segment's own width")
     neck = _seg(0, 5, 3, 5, net_id=2, width=0.1)
-    check("neck-down not widened", relayer_width(neck, 'B.Cu', config) == 0.1)
+    check("neck-down not widened", relayer_width is not None
+          and relayer_width(neck, 'B.Cu', config) == 0.1)
     pcb3 = _pcb([neck], {2: [_pad(0, 5, net_id=2)]})
     stub3 = StubInfo(net_id=2, x=3, y=5, layer='F.Cu', segments=[neck],
                      pad_x=0, pad_y=5, has_pad_via=True)
@@ -138,8 +143,8 @@ def main():
 
     print("5: legality checks size the stub at the destination width")
     probe = _seg(2, 0, 6, 0, width=0.18)
-    check("relayer_width F.Cu -> In2.Cu = 0.102",
-          abs(relayer_width(probe, 'In2.Cu', config) - 0.102) < 1e-9)
+    check("relayer_width F.Cu -> In2.Cu = 0.102", relayer_width is not None
+          and abs(relayer_width(probe, 'In2.Cu', config) - 0.102) < 1e-9)
 
     print()
     if fails:
