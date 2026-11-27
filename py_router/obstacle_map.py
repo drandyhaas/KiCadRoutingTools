@@ -37,11 +37,6 @@ except ImportError:
     GridObstacleMap = None
 
 
-#: The rung proxy of the most recent #530 rung sub-build, so the parent can
-#: read how many via rows it was offered (the sub-build returns the bare map).
-_LAST_RUNG_PROXY = [None]
-
-
 class _StaticViaRecord:
     """A Python-side copy of the via cells a ``_StaticStampProxy`` put in the
     static via bitmap, over the board's grid box (cells outside it are simply
@@ -94,6 +89,20 @@ class _StaticViaRecord:
         out = np.zeros(len(ix), dtype=bool)
         out[ok] = self.grid[iy[ok], ix[ok]]
         return out
+
+
+def _builds_rung_passes(config, pcb_data) -> bool:
+    """True when ``build_base_obstacle_map`` will run at least one #530 rung
+    sub-build for this config -- the only reader of a ``_StaticViaRecord``, so
+    a board with no per-net via rung never pays for one (up to 400 MB)."""
+    try:
+        from obstacle_cache import via_rungs, _small_via_pair
+        n = len(via_rungs(config, pcb_data))
+        if n and _small_via_pair(config, pcb_data) is not None:
+            n -= 1          # the #568 small rung is not sub-built
+        return n > 0
+    except Exception:       # noqa: BLE001 -- the rung loop reports its own failure
+        return False
 
 
 class _StaticStampProxy:
@@ -323,7 +332,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             _rung_pass: bool = False,
                             stamp_pads: bool = True,
                             _area_pass=None,
-                            _rung_parent_static=None) -> GridObstacleMap:
+                            _rung_parent_static=None,
+                            _rung_proxy_out=None) -> GridObstacleMap:
     """Build base obstacle map with static obstacles (BGA zones, pads, pre-existing tracks/vias).
 
     Excludes all nets that will be routed (nets_to_route) - their stubs will be added
@@ -398,7 +408,9 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                      _real_obstacles,
                      # recorded only where a rung sub-build can use it
                      via_record=(_StaticViaRecord.for_board(pcb_data, coord)
-                                 if not _rung_pass and _area_pass is None and _area is None
+                                 if (not _rung_pass and _area_pass is None
+                                     and _area is None
+                                     and _builds_rung_passes(config, pcb_data))
                                  else None))
                  if static_base and hasattr(_real_obstacles, "add_static_blocked_cells_batch")
                  else _real_obstacles)
@@ -406,7 +418,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         obstacles = _RungPassStampProxy(
             _real_obstacles,
             parent_static=_rung_parent_static if _area is None else None)
-        _LAST_RUNG_PROXY[0] = obstacles
+        if _rung_proxy_out is not None:
+            _rung_proxy_out.append(obstacles)
     _stamp_target = obstacles
     if _area_pass is not None:
         obstacles = _area_pass[0].inside(_area_pass[2], _area_pass[3], _area_pass[1],
@@ -916,29 +929,35 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 if _env_small is not None and _r == 1:
                     continue   # the #568 small rung keeps its base-less (static) discipline
                 from dataclasses import replace as _dc_replace
+                _proxy_out = []
                 _sub = build_base_obstacle_map(
                     pcb_data, _dc_replace(config, via_size=_d, via_drill=_h),
                     nets_to_route, extra_clearance, net_clearances,
                     static_base=False, _rung_pass=True, stamp_pads=stamp_pads,
-                    _rung_parent_static=_parent_static)
+                    _rung_parent_static=_parent_static,
+                    _rung_proxy_out=_proxy_out)
                 _cells = np.asarray(_sub.blocked_via_cells_at_rung(0),
                                     dtype=np.int32).reshape(-1, 2)
                 del _sub
                 if _parent_static is not None:
-                    _px = _LAST_RUNG_PROXY[0]
-                    _offered = len(_cells) or (_px.offered[0] if _px is not None else 1)
+                    _offered = len(_cells) or (_proxy_out[0].offered[0]
+                                               if _proxy_out else 1)
                     if len(_cells):
                         _cells = _cells[~_parent_static.covered(_cells)]
-                    _LAST_RUNG_PROXY[0] = None
                     if not len(_cells) and _offered:
                         # An EMPTY rung map reads as "no rung" (is_via_blocked_rung
                         # falls back to rung 0's rules), so a rung filtered down to
                         # nothing keeps one cell the static bitmap already blocks:
                         # the rung exists and answers exactly as unfiltered.
-                        _nz = np.argwhere(_parent_static.grid[:1 << 30])[:1]
-                        if len(_nz):
-                            _cells = np.array([[_nz[0][1] + _parent_static.ox,
-                                                _nz[0][0] + _parent_static.oy]],
+                        # argmax finds the first recorded cell without
+                        # materialising every one (argwhere would: ~0.5 GB
+                        # on a large board).
+                        _flat = _parent_static.grid.ravel()
+                        _i = int(_flat.argmax())
+                        if _flat[_i]:
+                            _iy, _ix = divmod(_i, _parent_static.grid.shape[1])
+                            _cells = np.array([[_ix + _parent_static.ox,
+                                                _iy + _parent_static.oy]],
                                               dtype=np.int32)
                     print(f"  obstacles[via rung {_d:g}/{_h:g}]: {len(_cells)} via "
                           f"cell(s) beyond the run via's static keep-out",

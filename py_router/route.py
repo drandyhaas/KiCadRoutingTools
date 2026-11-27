@@ -33,32 +33,6 @@ exit_on_error_if_main(__name__)
 
 import time
 _RUN_T0 = time.monotonic()  # "Wall time" counts from here, ahead of the heavy imports
-
-
-class _SetupClock:
-    """Stage-by-stage wall clock for batch_route's setup.
-
-    Setup on a big board (parse, zone refill, obstacle maps, cost fields) can
-    run for minutes before the first net is tried, and most of it printed
-    nothing. ``mark(stage)`` closes the stage that just ran and logs it when it
-    took 1 s or more; ``total()`` always logs, so every run says when routing
-    actually started. Reporting only."""
-
-    def __init__(self):
-        self.t0 = self.t = time.monotonic()
-
-    def mark(self, stage: str) -> None:
-        now = time.monotonic()
-        dt, self.t = now - self.t, now
-        if dt >= 1.0:
-            print(f"  [setup] {stage}: {dt:.1f}s "
-                  f"(run clock {now - _RUN_T0:.0f}s)", flush=True)
-
-    def total(self) -> None:
-        now = time.monotonic()
-        self.t = now
-        print(f"Setup done in {now - self.t0:.1f}s "
-              f"(run clock {now - _RUN_T0:.0f}s); routing starts", flush=True)
 import json
 from typing import List, Optional, Tuple, Dict, Set, Sequence
 
@@ -3035,7 +3009,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # phase-1/phase-3 routes inside the 0.5mm project edge band).
         _reconcile_kwargs['board_edge_clearance'] = board_edge_clearance
 
-    _clk = _SetupClock()
+    from setup_clock import SetupClock as _SetupClock
+    _clk = _SetupClock(_RUN_T0)
     # Track memory if debug_memory enabled
     mem_start = get_process_memory_mb() if debug_memory else 0.0
     if debug_memory:
