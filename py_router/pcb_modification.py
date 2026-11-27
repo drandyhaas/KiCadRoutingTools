@@ -707,10 +707,10 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 return True
         return False
 
-    from check_drc import copper_keepout_gate, filled_graphic_shapes
+    from check_drc import copper_keepout_gate, FilledCopperGate
     _ko_refuses = copper_keepout_gate(pcb_data)
     _area_cfg = config if getattr(config, 'area_clearance', None) is not None else None
-    _close_fills = filled_graphic_shapes(pcb_data)
+    _close_fills = FilledCopperGate(pcb_data)
 
     def clears(nid, x1, y1, x2, y2, layer, w):
         # #1843: `config` holds a bridge in a rule area to the area's value
@@ -734,9 +734,11 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 hd >= npth_clr + w / 2.0 - 1e-4):
             return False
         # filled footprint copper (an SOT tab): the distances above measure it
-        # by its outline strokes only, so a bridge inside the fill read clear
-        if not _filled_graphics_clear(_close_fills, x1, y1, x2, y2, layer,
-                                      nid, w, clr):
+        # by its outline strokes only, so a bridge inside the fill read clear.
+        # The gate lifts a shape for the net its own pads give it, as the
+        # obstacle map does, so a bridge of the tab's own net stays legal.
+        if _close_fills and _close_fills.segment_hit(
+                x1, y1, x2, y2, w, layer, nid, clr) is not None:
             return False
         # #1760: a bridge must not enter a keep-out the route kept out of (a
         # tracks-not-allowed rule area, a net-filtered keep-out). The joint
@@ -1921,31 +1923,6 @@ def _restore_soft_joint_bridges(kept, removed, vias, pads):
         if not restored:
             break  # gap not attributable to these removals; leave it
     return kept, removed
-
-
-def _filled_graphics_clear(fills, x1, y1, x2, y2, layer, net_id, w, clearance):
-    """Does a new ``w`` track x1,y1 -> x2,y2 keep ``clearance`` from every
-    FILLED footprint graphic of another net (an SOT tab, a shield, #1181)?
-    The segment gates measure such copper by its outline strokes only, so a
-    leg laid inside the fill read clear; the obstacle map stamps the
-    interiors, and the passes that place copper after it test them here.
-    ``fills``: check_drc.filled_graphic_shapes(pcb_data)."""
-    if not fills:
-        return True
-    n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.05) + 1)
-    m = clearance + w / 2.0
-    for f in fills:
-        if f.layer != layer or f.net_id == net_id:
-            continue
-        x0, y0, xx, yy = f._bbox
-        if (max(x1, x2) < x0 - m or min(x1, x2) > xx + m
-                or max(y1, y2) < y0 - m or min(y1, y2) > yy + m):
-            continue
-        for q in range(n + 1):
-            x, y = x1 + (x2 - x1) * q / n, y1 + (y2 - y1) * q / n
-            if f.contains(x, y) or f.boundary_distance(x, y) < m - 1e-4:
-                return False
-    return True
 
 
 def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
