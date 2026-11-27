@@ -739,6 +739,32 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
             [Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2, width=w,
                      layer=layer, net_id=nid)]))
 
+    def foreign_reach(nid, x1, y1, x2, y2, layer):
+        """(centreline distance to foreign copper, to a foreign hole)."""
+        d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer,
+                                      base_clearance=clr, config=_area_cfg),
+                _seg_foreign_seg_dist(pcb_data, nid, x1, y1, x2, y2, layer,
+                                      base_clearance=clr, config=_area_cfg),
+                _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer,
+                                      base_clearance=clr, config=_area_cfg))
+        hd = min(_seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2),
+                 _own_net_npth_hole_dist(pcb_data, nid, x1, y1, x2, y2))
+        return d, hd
+
+    def no_closer(nid, x1, y1, x2, y2, layer, w):
+        """#1235: does a bridge from the end (x1, y1) come no closer to
+        foreign copper and holes than the end's own copper already does (at
+        the gate's clearance where the end keeps more), and enter no
+        keep-out? It then adds no clearance a check can see."""
+        d, hd = foreign_reach(nid, x1, y1, x2, y2, layer)
+        d0, hd0 = foreign_reach(nid, x1, y1, x1, y1, layer)
+        if not (d >= min(clr + w / 2.0, d0) - 1e-4
+                and hd >= min(npth_clr + w / 2.0, hd0) - 1e-4):
+            return False
+        return not (_ko_refuses and _ko_refuses(
+            [Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2, width=w,
+                     layer=layer, net_id=nid)]))
+
     new_conns = []
     for (net_id, layer), ends in dangles.items():
         used = set()
@@ -932,7 +958,11 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     centre_conns = []
     routed_ids = {id(x) for r in results if not r.get('cleanup')
                   for x in (r.get('new_segments') or ())}
-    graded = length_graded_net_ids(pcb_data, config)
+    # #1235 (config.via_centre_ends): every net's track meets its vias at
+    # the centre, so every net is bridged, not only the length-graded ones.
+    _centre_all = bool(getattr(config, 'via_centre_ends', False))
+    _length_graded = length_graded_net_ids(pcb_data, config)
+    graded = set(pcb_data.nets) if _centre_all else _length_graded
     oc_segs = [s for s in pcb_data.segments
                if s.net_id in graded
                and (scope_net_ids is None or s.net_id in scope_net_ids)
@@ -964,7 +994,19 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 bx, by = ox + ux * te, oy + uy * te
         if (math.hypot(bx - v.x, by - v.y) + w / 2.0 > r + 1e-6
                 and not clears(s.net_id, bx, by, v.x, v.y, s.layer, w)):
-            continue
+            # #1235 (config.via_centre_ends): the cut moves the bridge's start
+            # onto the rim, where half its width stands outside the disc; from
+            # the end itself it may lie wholly inside the via's copper. A net
+            # no length grade reads loses nothing by keeping its run past E.
+            # Nor is the bridge held to this pass's clearance where the end
+            # it starts from is laid tighter (an escalated rescue): it may go
+            # where it comes no closer to foreign copper than that end does.
+            if not (_centre_all and s.net_id not in _length_graded
+                    and (math.hypot(ex - v.x, ey - v.y) + w / 2.0 <= r + 1e-6
+                         or clears(s.net_id, ex, ey, v.x, v.y, s.layer, w)
+                         or no_closer(s.net_id, ex, ey, v.x, v.y, s.layer, w))):
+                continue
+            bx, by = ex, ey
         done_ends.add(key)
         if (bx, by) != (ex, ey):
             if end == 0:
@@ -3247,6 +3289,7 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
                               keep_input_copper: bool = False,
                               protect_segment_ids=None,
                               stats: Optional[dict] = None,
+                              keep_all_centre_stubs: bool = False,
                               ) -> Tuple[int, List[Segment]]:
     """Remove copper that is redundant under the STRICT removability model
     (StrictRemovalModel; #217 classes 1-2, #1063): superseded parallel chains
@@ -3332,7 +3375,8 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
                                    copper_layers, readonly_ids=readonly,
                                    droppable_via_ids=droppable,
                                    web_floor=web_floor,
-                                   keep_centre_stubs=net_id in stub_ids)
+                                   keep_centre_stubs=(keep_all_centre_stubs
+                                                      or net_id in stub_ids))
         if not model.valid:
             continue
         _dbg = None
@@ -4094,6 +4138,30 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
     return necked
 
 
+def via_centre_stub_ids(net_segs, net_vias) -> set:
+    """#1235: ids of the segments that join a same-net via's copper to its
+    CENTRE -- one end on the centre, the other inside the via's copper on the
+    segment's layer: a via-centre bridge (close_soft_joints) or the last leg
+    of a track laid to the centre. To connectivity such a stub closes a loop
+    with the via it sits in, so a cycle prune of a net laid with via-centre
+    ends (cleanup_pipeline._via_centre_net_ids) must leave it."""
+    from geometry_utils import via_on_layer
+    out = set()
+    for s in net_segs:
+        if getattr(s, 'graphic', False):
+            continue
+        for v in net_vias:
+            r = (getattr(v, 'size', 0.0) or 0.0) / 2.0
+            if r <= 0 or not via_on_layer(v, s.layer):
+                continue
+            a = math.hypot(s.start_x - v.x, s.start_y - v.y)
+            b = math.hypot(s.end_x - v.x, s.end_y - v.y)
+            if min(a, b) < 1e-4 and max(a, b) <= r + 1e-6:
+                out.add(id(s))
+                break
+    return out
+
+
 def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
                       fgrid, fcell: float, fmax_rad: float, clearance: float,
                       protected_ids=None):
@@ -4306,7 +4374,8 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
 
 def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
                            clearance: float = 0.1,
-                           keep_input_copper: bool = False) -> Tuple[int, int, List[Segment]]:
+                           keep_input_copper: bool = False,
+                           keep_all_centre_stubs: bool = False) -> Tuple[int, int, List[Segment]]:
     """Enforce the per-net TREE invariant: remove redundant cycle edges (the cycle
     analog of sweep_dead_ends).
 
@@ -4370,15 +4439,25 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
     vias_by_net = defaultdict(list)
     for v in pcb_data.vias:
         vias_by_net[v.net_id].append(v)
+    # #1235: the nets laid with via-centre ends -- every net with the flag,
+    # else the ones an earlier step recorded; a stub closes a loop with its
+    # via and stays.
+    if keep_all_centre_stubs:
+        stub_nets = None
+    else:
+        from cleanup_pipeline import _via_centre_net_ids
+        stub_nets = _via_centre_net_ids(pcb_data)
     for net_id, net_segs in segs_by_net.items():
         if net_id in zoned_nets:  # planes / pours are meshes, not trees
             continue
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         net_vias = vias_by_net.get(net_id, [])
+        _stubs = (via_centre_stub_ids(net_segs, net_vias)
+                  if stub_nets is None or net_id in stub_nets else set())
         _protected = ({id(s) for s in net_segs
                        if _locked(s)   # #1261: locked copper never pruned
                        or (keep_input_copper and id(s) not in routed_seg_ids)}
-                      or None)
+                      | _stubs) or None
         kept, removed = _prune_net_cycles(net_id, net_segs, net_vias,
                                           net_pads, fgrid, _FCELL, fmax_rad, clearance,
                                           protected_ids=_protected)
@@ -7804,7 +7883,10 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
 
     Guardrails (why this is safe where the removed in-routing nudge_grazes was
     not, #147/#70/#130):
-      * post-route and via-only -- nothing is ripped, re-routed, or dragged;
+      * post-route and via-only -- nothing is ripped, re-routed, or dragged
+        (except under config.via_centre_ends, #1235: this run's tracks
+        ending at the via's centre move with it, each leg cleared first, and
+        a via whose tracks cannot follow is not moved);
       * the move is hard-capped at min(``max_shift``, via_size/4) (callers
         pass grid_step/2): a via needing more is genuinely mis-placed and
         stays visible in DRC;
@@ -7841,6 +7923,12 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     MARGIN = 0.002
     WINDOW = 2.0     # local object window around a flagged via (mm)
     _edge_clr = max(clearance, board_edge_clearance)  # #438 honor board edge rule
+    # #1235: with config.via_centre_ends a nudged via takes this run's tracks
+    # ending at its centre along (_via_drag_ends)
+    _drag_centre = bool(getattr(config, 'via_centre_ends', False))
+    _run_seg_ids = ({id(x) for r in (results or ())
+                     for x in (r.get('new_segments') or ())}
+                    if _drag_centre else set())
 
     def eff_clr(nid):
         # #436: moving net's own floor = max(global, its netclass).
@@ -8256,13 +8344,27 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             if _ko_free and _ko_at(v, nx, ny):
                 continue
 
+            # #1235 (config.via_centre_ends): the run's tracks ending at the
+            # via's centre go with it, so none is left ending in its copper
+            # beside the centre; a via whose tracks cannot follow clear (or
+            # are input copper, which the writers keep as it was) stays put
+            drag = []
+            if _drag_centre:
+                drag = _via_drag_ends(v, net_segs, nx, ny, _run_seg_ids,
+                                      pcb_data, eff_clr(v.net_id),
+                                      net_clearances, _area)
+                if drag is None:
+                    continue
+
             # apply, verify connectivity, revert on regression
             old_x, old_y = v.x, v.y
             v.x, v.y = nx, ny
+            _move_ends(drag, nx, ny)
             after = check_net_connectivity(v.net_id, net_segs, net_vias, net_pads,
                                            net_zones, pcb_data=pcb_data)
             if worse(before, after):
                 v.x, v.y = old_x, old_y
+                _move_ends(drag, old_x, old_y)
                 continue
             moved += 1
             nets_changed_set.add(v.net_id)
@@ -8274,6 +8376,39 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             break
 
     return moved, len(nets_changed_set), moves
+
+
+def _via_drag_ends(v, net_segs, nx, ny, run_seg_ids, pcb_data, clr,
+                   net_clearances=None, area=None):
+    """#1235: the (segment, end) pairs of ``net_segs`` that end at via
+    ``v``'s centre, to move with it to (nx, ny) -- or None when one cannot:
+    it is not this run's copper (id not in ``run_seg_ids``) or its moved
+    geometry would not clear foreign copper (_connector_clear)."""
+    out = []
+    for sg in net_segs:
+        for end, (ex, ey) in enumerate(((sg.start_x, sg.start_y),
+                                        (sg.end_x, sg.end_y))):
+            if math.hypot(ex - v.x, ey - v.y) > 1e-4:
+                continue
+            if id(sg) not in run_seg_ids:
+                return None
+            ox, oy = ((sg.end_x, sg.end_y) if end == 0
+                      else (sg.start_x, sg.start_y))
+            if not _connector_clear(ox, oy, nx, ny, sg.width, sg.layer,
+                                    sg.net_id, pcb_data, clr,
+                                    net_clearances=net_clearances, area=area):
+                return None
+            out.append((sg, end))
+    return out
+
+
+def _move_ends(drag, x, y):
+    """Put each (segment, end) of ``drag`` at (x, y)."""
+    for sg, end in drag:
+        if end == 0:
+            sg.start_x, sg.start_y = x, y
+        else:
+            sg.end_x, sg.end_y = x, y
 
 
 def _pt_seg_dist_t(x, y, s):

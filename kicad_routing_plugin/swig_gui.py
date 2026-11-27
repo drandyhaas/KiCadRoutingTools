@@ -1517,6 +1517,15 @@ class RoutingDialog(wx.Dialog):
             "is read from the saved board file.")
         options_inner.Add(self.mask_keepouts, 0, wx.ALL, 3)
 
+        # Tracks meet vias at the centre (route.py --via-centre-ends, #1235)
+        self.via_centre_ends = wx.CheckBox(options_scroll, label="Tracks meet vias at the centre")
+        self.via_centre_ends.SetValue(defaults.VIA_CENTRE_ENDS)
+        self.via_centre_ends.SetToolTip(
+            "A track that ends on, or runs through, a same-net via meets it at the via's centre "
+            "(taps, layer changes, paths through a via, nudged vias), where the legs clear "
+            "foreign copper. Changes copper.")
+        options_inner.Add(self.via_centre_ends, 0, wx.ALL, 3)
+
         # Keepout zone: keep tracks out of a user-drawn polygon (issue #27)
         self.keepout_check = wx.CheckBox(options_scroll, label="Keep out of User-layer polygon(s)")
         self.keepout_check.SetValue(defaults.KEEPOUT_ENABLED)
@@ -3142,6 +3151,7 @@ class RoutingDialog(wx.Dialog):
         self.keepout_check.SetValue(defaults.KEEPOUT_ENABLED)
         self.keepout_layer_ctrl.SetValue(defaults.KEEPOUT_LAYER)
         self.mask_keepouts.SetValue(defaults.MASK_KEEPOUTS)
+        self.via_centre_ends.SetValue(defaults.VIA_CENTRE_ENDS)
         # "Fix DRC settings after routing" (#160/#693), ticked as the
         # constructor ticks it. A plan replays route.py's per-step semantics:
         # a step without --no-fix-drc-settings writes the DRC floors back, a
@@ -3517,6 +3527,7 @@ class RoutingDialog(wx.Dialog):
             # Keepout zone (issue #27)
             'keepout_enabled': self.keepout_check.GetValue(),
             'mask_keepouts': self.mask_keepouts.GetValue(),
+            'via_centre_ends': self.via_centre_ends.GetValue(),
             'keepout_layer': self.keepout_layer_ctrl.GetValue().strip() or defaults.KEEPOUT_LAYER,
             # Clear User-layer graphics after a successful route (plugin-only)
             'clear_guide_layer': self.clear_guide_layer_check.GetValue(),
@@ -4092,6 +4103,7 @@ class RoutingDialog(wx.Dialog):
                     guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
                     keepout_enabled=config.get('keepout_enabled', False),
                     mask_keepouts=config.get('mask_keepouts', defaults.MASK_KEEPOUTS),
+                    via_centre_ends=config.get('via_centre_ends', defaults.VIA_CENTRE_ENDS),
                     keepout_layer=config.get('keepout_layer', 'User.2'),
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),
@@ -4608,6 +4620,9 @@ class RoutingDialog(wx.Dialog):
                                         persist_intra_pair_tolerances)
             persist_intra_pair_tolerances(_pro, consume_intra_pair_tolerances(),
                                           board=board)
+            # #1235: the nets laid with via-centre ends.
+            from protected_nets import consume_via_centre_nets, persist_via_centre_nets
+            persist_via_centre_nets(_pro, consume_via_centre_nets(), board=board)
             # #1807: the improvement gate's record of this step's trade, for
             # the next step's gate (a rejected step's too).
             from improvement_gate import consume_lap_history

@@ -658,6 +658,12 @@ on the corpus.
 | `neckdown_length` | `2.5` | Length of the pad-entry zone at each pad end: the power width capped at the pad's short side where it fits, narrow only where it does not (#1318). Under `--escalation off` capped at `PAD_ENTRY_NECK_MM` less `neckdown_taper_length` (#1452) |
 | `neckdown_taper_length` | `0.5` | Taper from narrow to full width (0 = abrupt) |
 
+### Via-centre ends
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `via_centre_ends` | `False` | #1235: a track that ends on, or runs through, a same-net via meets it at the via's centre -- layer changes, path ends on a via, paths through a via's disc, taps in a via's copper, and nudged vias' tracks -- where the legs clear foreign copper; any end still off a centre after the post-route passes gets `close_soft_joints`' via-centre bridge on every net, which the strict collapse and cycle prune keep, and the step records the nets in `kicad_routing_tools.via_centre_nets` for later steps and `check_weird` (`routing_defaults.VIA_CENTRE_ENDS`; route.py `--via-centre-ends`) |
+
 ### Clearance details and DRC margins
 
 | Field | Default | Meaning |

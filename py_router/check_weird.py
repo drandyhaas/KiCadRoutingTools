@@ -494,7 +494,7 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
 
 
 def _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
-                  findings, removable=None):
+                  findings, removable=None, keep_centre_stubs=False):
     """Report-only spanning-tree reduction (prune_redundant_cycles machinery).
     _prune_net_cycles internally validates every proposed removal against
     check_net_connectivity, so reported edges are guaranteed redundant.
@@ -525,6 +525,12 @@ def _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
         # copper no pass will ever take out.
         _k, removed = _restore_soft_joint_bridges(list(kept), list(removed),
                                                   net_vias, net_pads)
+        if keep_centre_stubs:
+            # #1235: a via-centre stub the prune keeps on a net laid with
+            # via-centre ends (prune_redundant_cycles)
+            from pcb_modification import via_centre_stub_ids
+            stubs = via_centre_stub_ids(track_segs, net_vias)
+            removed = [s for s in removed if id(s) not in stubs]
     for s in removed:
         mx, my = (s.start_x + s.end_x) / 2.0, (s.start_y + s.end_y) / 2.0
         findings.append(_finding(
@@ -1120,8 +1126,11 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
     from fix_kicad_drc_settings import connection_width_floor
     min_track_w = connection_width_floor(pcb_data)
     # #1798: the nets the removal pass keeps via-centre stubs on.
-    from cleanup_pipeline import _centre_stub_net_ids
+    from cleanup_pipeline import _centre_stub_net_ids, _via_centre_net_ids
     stub_ids = _centre_stub_net_ids(pcb_data)
+    # #1235: the nets laid with via-centre ends, whose stubs the cycle prune
+    # keeps too (prune_redundant_cycles)
+    centred_ids = _via_centre_net_ids(pcb_data)
 
     net_ids = set(segs_by_net) | set(vias_by_net)
     check_ids = []
@@ -1157,7 +1166,7 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
                                       thorough, skipped_nets, min_track_w,
                                       keep_centre_stubs=net_id in stub_ids)
         _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
-                      findings, removable)
+                      findings, removable, keep_centre_stubs=net_id in centred_ids)
         _check_removable(net_id, name, net_segs, removable, findings)
         _check_stacked(net_id, name, net_segs, net_vias, findings)
         _check_off_centre_via_ends(name, net_segs, net_vias, net_pads,

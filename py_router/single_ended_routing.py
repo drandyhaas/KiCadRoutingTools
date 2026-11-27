@@ -1812,6 +1812,219 @@ def _neck_route_terminal_grazes(segments, path, coord, start_original, end_origi
     return _hard
 
 
+def _centre_legs_clear(pts, i_before, i_after, cx, cy, layer_before,
+                       layer_after, layer_names, net_id, config, pcb_data):
+    """Do the legs pts[i_before] -> (cx, cy) on ``layer_before`` and
+    (cx, cy) -> pts[i_after] on ``layer_after`` clear foreign copper at the
+    net's own clearance? An index outside ``pts`` has no leg."""
+    from pcb_modification import _connector_clear
+    ncl = getattr(config, 'net_clearances', None) or None
+    for j, li in ((i_before, layer_before), (i_after, layer_after)):
+        if not 0 <= j < len(pts):
+            continue
+        ln = layer_names[li]
+        if not _connector_clear(
+                pts[j][0], pts[j][1], cx, cy,
+                config.get_net_track_width(net_id, ln), ln, net_id, pcb_data,
+                config.layer_clearance(ln, config.obstacle_clearance(net_id), net_id),
+                net_clearances=ncl):
+            return False
+    return True
+
+
+def _snap_layer_changes_to_barrels(path, pts, coord, layer_names, net_id,
+                                   config, pcb_data, through_hole_positions,
+                                   partial_spans, reuse, frozen=(),
+                                   originals=None):
+    """#1235 (config.via_centre_ends): lay each layer change of ``path`` on
+    the CENTRE of the barrel that carries it, so neither leg ends in the via's
+    copper beside its centre.
+
+    The barrel is the via the conversion drills (at ``_emit_via_site``, which
+    can sit off the grid cell a #189/#535 unblock checked), the same-net via
+    it rides instead (#671, with ``reuse``), or an existing same-net via whose
+    copper holds the cell (a through-hole PAD is left alone: its exits are
+    the pad's). A change is moved only when both legs into the centre clear
+    foreign copper; ``pts`` indices in ``frozen`` (a terminal merged onto its
+    exact endpoint) are never moved. ``originals`` maps a path end index (0,
+    len-1) to its endpoint row ``(x, y, layer)`` or None: a change at a path
+    end also needs the connector from that row's point to the centre, the
+    bridge the conversion lays on the path's layer, to clear. ``pts`` is
+    edited in place.
+
+    Returns {(gx, gy, layer_from, layer_to): (x, y, size, drill,
+    ridden_via_or_None)} for each change that drills or rides a via of this
+    path (keyed by cell, not index: _route_through_via_centres shortens the
+    path afterwards), so the conversion emits the barrel the snap centred on
+    rather than re-deriving it."""
+    sites = {}
+    if pcb_data is None:
+        return sites
+    for i in range(len(path) - 1):
+        gx1, gy1, layer1 = path[i]
+        gx2, gy2, layer2 = path[i + 1]
+        if layer1 == layer2 or (gx1, gy1) != (gx2, gy2):
+            continue
+        on_th = bool(through_hole_positions) and (gx1, gy1) in through_hole_positions
+        on_partial = {layer_names[layer1], layer_names[layer2]} <= \
+            (partial_spans or {}).get((gx1, gy1), frozenset())
+        if on_th or on_partial:
+            # an existing barrel carries the change: a same-net VIA whose
+            # copper holds the cell is met at its centre
+            x0, y0 = pts[i]
+            barrel = min((v for v in pcb_data.vias if v.net_id == net_id
+                          and math.hypot(v.x - x0, v.y - y0)
+                          <= (getattr(v, 'size', 0.0) or 0.0) / 2.0),
+                         key=lambda v: math.hypot(v.x - x0, v.y - y0),
+                         default=None)
+            if barrel is None:
+                continue
+            vx, vy = barrel.x, barrel.y
+        else:
+            vx, vy = _emit_via_site(pcb_data, gx1, gy1,
+                                    *coord.to_float(gx1, gy1), net_id)
+            vsz, vdr = _emit_via_size(pcb_data, gx1, gy1, config,
+                                      net_id=net_id, x=vx, y=vy)
+            ridden = None
+            if reuse:
+                ridden = _reusable_same_net_via(
+                    pcb_data, net_id, vx, vy, vdr, config,
+                    (layer_names[layer1], layer_names[layer2]))
+            sites[(gx1, gy1, layer1, layer2)] = (vx, vy, vsz, vdr, ridden)
+            if ridden is not None:
+                vx, vy = ridden.x, ridden.y
+        if abs(pts[i][0] - vx) < 1e-6 and abs(pts[i][1] - vy) < 1e-6 \
+                and abs(pts[i + 1][0] - vx) < 1e-6 and abs(pts[i + 1][1] - vy) < 1e-6:
+            continue
+        if i in frozen or (i + 1) in frozen:
+            continue
+        if not _centre_legs_clear(pts, i - 1, i + 2, vx, vy, layer1, layer2,
+                                  layer_names, net_id, config, pcb_data):
+            continue
+        if not all(_centre_legs_clear([orig[:2]], 0, -1, vx, vy, li, li,
+                                      layer_names, net_id, config, pcb_data)
+                   for k, li in ((i, layer1), (i + 1, layer2))
+                   for orig in ((originals or {}).get(k),)
+                   if orig is not None and k in (0, len(path) - 1)
+                   and math.hypot(orig[0] - vx, orig[1] - vy) > 1e-6):
+            continue
+        pts[i] = pts[i + 1] = (vx, vy)
+    return sites
+
+
+def _route_through_via_centres(path, pts, layer_names, net_id, config,
+                               pcb_data, extra_barrels=()):
+    """#1235 (config.via_centre_ends): a path whose points run through the
+    copper of one of its net's vias passes through that via's CENTRE.
+
+    The run of interior points inside the via's disc on one layer becomes the
+    one centre point, so no bend -- nor the junction a later tap lands on --
+    sits in the via's copper beside its centre. ``extra_barrels`` are
+    (x, y, size) barrels this path drills itself. Made only when both legs
+    into the centre clear foreign copper. Returns (path, pts)."""
+    if pcb_data is None or len(path) < 3:
+        return path, pts
+    from geometry_utils import via_on_layer
+    barrels = [(v.x, v.y, getattr(v, 'size', 0.0) or 0.0, v)
+               for v in pcb_data.vias if v.net_id == net_id]
+    barrels += [(x, y, s, None) for x, y, s in extra_barrels]
+    for bx, by, bsize, via in barrels:
+        r = bsize / 2.0
+        if r <= 0:
+            continue
+        i = 1
+        while i < len(pts) - 1:
+            d = math.hypot(pts[i][0] - bx, pts[i][1] - by)
+            if not (1e-6 < d <= r + 1e-9):
+                i += 1
+                continue
+            j = i
+            while (j + 1 < len(pts) - 1 and path[j + 1][2] == path[i][2]
+                   and math.hypot(pts[j + 1][0] - bx, pts[j + 1][1] - by)
+                   <= r + 1e-9):
+                j += 1
+            li = path[i][2]
+            # a run that changes layer inside the disc is the snap's to centre
+            if path[i - 1][2] != li or path[j + 1][2] != li or (
+                    via is not None and not via_on_layer(via, layer_names[li])):
+                i = j + 1
+                continue
+            if _centre_legs_clear(pts, i - 1, j + 1, bx, by, li, li,
+                                  layer_names, net_id, config, pcb_data):
+                path = path[:i] + [path[i]] + path[j + 1:]
+                pts = pts[:i] + [(bx, by)] + pts[j + 1:]
+            i += 1
+    return path, pts
+
+
+def _snap_terminals_to_vias(path, pts, layer_names, net_id, config, pcb_data,
+                            originals, frozen=()):
+    """#1235 (config.via_centre_ends): a path END lying inside one of its
+    net's vias, off the via's centre, is moved onto the centre.
+
+    The case is a #189 via-in-pad unblock: its via is drilled at a site
+    checked on a fine pass, off the grid cell the route is given as its
+    terminal, so the route used to end on the cell's grid point, up to half a
+    cell beside the via's centre (and the connector to the pad's own point
+    is dropped as lying inside that via, _bridge_inside_own_through_via). The
+    via is the site the unblock registered for the cell
+    (``_unblock_via_sites``), else a same-net via of the board whose copper
+    holds the end on its layer.
+
+    ``originals`` maps an end index (0, len-1) to its endpoint row
+    ``(x, y, layer)`` or None. The move is made only when the leg from the
+    path's neighbour point, and the connector from the row's point when it
+    is another point, clear foreign copper into the centre; indices in
+    ``frozen`` (a terminal merged onto its exact endpoint) stay put. ``pts``
+    is edited in place."""
+    if pcb_data is None or len(path) < 2:
+        return
+    from geometry_utils import via_on_layer
+    coord = GridCoord(config.grid_step)
+    sites = getattr(pcb_data, '_unblock_via_sites', None) or {}
+    for k, orig in originals.items():
+        if k in frozen:
+            continue
+        nb = 1 if k == 0 else len(path) - 2
+        if path[nb][2] != path[k][2]:
+            continue        # a layer change at the end: the barrel snap's
+        li = path[k][2]
+        x0, y0 = pts[k]
+        gx, gy = path[k][0], path[k][1]
+        centre = sites.get((net_id, gx, gy))
+        if centre is not None and math.hypot(centre[0] - x0, centre[1] - y0) \
+                > coord.grid_step:
+            centre = None   # a site registered for the cell, not this end's
+        if centre is None:
+            lname = layer_names[li]
+            v = min((v for v in pcb_data.vias if v.net_id == net_id
+                     and via_on_layer(v, lname)
+                     and 1e-6 < math.hypot(v.x - x0, v.y - y0)
+                     <= (getattr(v, 'size', 0.0) or 0.0) / 2.0),
+                    key=lambda v: math.hypot(v.x - x0, v.y - y0), default=None)
+            if v is None:
+                continue
+            centre = (v.x, v.y)
+        cx, cy = centre
+        if math.hypot(cx - x0, cy - y0) <= 1e-6:
+            continue
+        legs = [pts[nb]]
+        if orig is not None and (abs(orig[0] - x0) > 1e-6 or abs(orig[1] - y0) > 1e-6):
+            legs.append((orig[0], orig[1]))
+        if _centre_legs_clear(legs, 0, len(legs) - 1 if len(legs) > 1 else -1,
+                              cx, cy, li, li, layer_names, net_id, config,
+                              pcb_data):
+            pts[k] = (cx, cy)
+
+
+def _path_barrels(sites):
+    """(x, y, size) of the vias a path drills, from the snap's ``sites`` (a
+    ridden via, and a change an existing barrel carries, are already among
+    the board's vias)."""
+    return [(x, y, size) for x, y, size, _dr, ridden in sites.values()
+            if ridden is None]
+
+
 def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
                              pcb_data, net_id, config, layer_names):
     """#4: route.py is on-grid, but a route's TERMINAL connects to an off-grid pad
@@ -3372,13 +3585,29 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
 
     # Simplify path by removing collinear intermediate points
     path = simplify_path(path)
+    pts = [coord.to_float(p[0], p[1]) for p in path]
+    # #1235: a layer change, and a path through one of the net's vias, meet
+    # the via at its centre (config.via_centre_ends)
+    via_sites = {}
+    _frozen = ()
+    if getattr(config, 'via_centre_ends', False):
+        via_sites = _snap_layer_changes_to_barrels(
+            path, pts, coord, layer_names, net_id, config, pcb_data,
+            through_hole_positions, partial_spans, reuse=False,
+            originals={0: start_original, len(path) - 1: end_original})
+        path, pts = _route_through_via_centres(
+            path, pts, layer_names, net_id, config, pcb_data,
+            extra_barrels=_path_barrels(via_sites))
+        _snap_terminals_to_vias(
+            path, pts, layer_names, net_id, config, pcb_data,
+            {0: start_original, len(path) - 1: end_original}, frozen=_frozen)
 
     new_segments = []
     new_vias = []
 
     start_bridge = None
     if start_original:
-        first_grid_x, first_grid_y = coord.to_float(path_start[0], path_start[1])
+        first_grid_x, first_grid_y = pts[0]
         orig_x, orig_y, orig_layer = start_original
         if abs(orig_x - first_grid_x) > 0.001 or abs(orig_y - first_grid_y) > 0.001:
             seg = Segment(
@@ -3397,8 +3626,8 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
         gx1, gy1, layer1 = path[i]
         gx2, gy2, layer2 = path[i + 1]
 
-        x1, y1 = coord.to_float(gx1, gy1)
-        x2, y2 = coord.to_float(gx2, gy2)
+        x1, y1 = pts[i]
+        x2, y2 = pts[i + 1]
 
         if layer1 != layer2:
             # Check if layer change is at an existing through-hole pad
@@ -3406,9 +3635,14 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
             if ((gx1, gy1) not in through_hole_positions
                     and not {layer_names[layer1], layer_names[layer2]}
                     <= partial_spans.get((gx1, gy1), frozenset())):
-                _vx, _vy = _emit_via_site(pcb_data, gx1, gy1, x1, y1, net_id)
-                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
-                                            net_id=net_id, x=_vx, y=_vy)
+                _site = via_sites.get((gx1, gy1, layer1, layer2))
+                if _site is not None:
+                    _vx, _vy, _vsz, _vdr, _ = _site
+                else:
+                    _vx, _vy = _emit_via_site(pcb_data, gx1, gy1,
+                                              *coord.to_float(gx1, gy1), net_id)
+                    _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
+                                                net_id=net_id, x=_vx, y=_vy)
                 via = Via(
                     x=_vx, y=_vy,
                     size=_vsz,
@@ -3441,7 +3675,7 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
         new_segments = [sg for sg in new_segments if sg is not start_bridge]
 
     if end_original:
-        last_grid_x, last_grid_y = coord.to_float(path_end[0], path_end[1])
+        last_grid_x, last_grid_y = pts[-1]
         orig_x, orig_y, orig_layer = end_original
         if (abs(orig_x - last_grid_x) > 0.001 or abs(orig_y - last_grid_y) > 0.001) \
                 and not _bridge_adds_nothing_in_keepout(
@@ -6090,7 +6324,9 @@ def _route_multipoint_main_impl(
         # fresh via to reach copper the island already spans.
         _vs = _vias_by_comp.get(_cid, [])
         _pts = _clear_launch_rows(
-            get_all_segment_tap_points(_segs, coord, layer_names, vias=_vs),
+            get_all_segment_tap_points(
+                _segs, coord, layer_names, vias=_vs,
+                centre_vias=getattr(config, 'via_centre_ends', False)),
             obstacles, coord, pcb_data, net_id)
         # Keyed by cell, valued by the OWNER float point of that cell --
         # the conversion below welds the route to the owner of the cell
@@ -6693,7 +6929,8 @@ def get_all_segment_tap_points(
     segments: List[Segment],
     coord: GridCoord,
     layer_names: List[str],
-    vias: List = None
+    vias: List = None,
+    centre_vias: bool = False
 ) -> List[Tuple[int, int, int, float, float]]:
     """
     Get all grid points along existing segments and vias as potential tap sources.
@@ -6703,6 +6940,10 @@ def get_all_segment_tap_points(
     45-degree segment between grid points yields its cells' exact grid
     points (#1291).
     Vias are added on ALL layers (they connect all copper layers).
+    With ``centre_vias`` (#1235, config.via_centre_ends) a sample inside the
+    copper of one of ``vias`` on its layer is owned by the via's CENTRE, so a
+    route launched from, or landing on, that cell welds to the centre rather
+    than to a point of the disc beside it.
     Sorted by grid coordinates for deterministic iteration.
     """
     # Use dict keyed by (gx, gy, layer_idx) to deduplicate while keeping original coords
@@ -6767,6 +7008,16 @@ def get_all_segment_tap_points(
             gx, gy = coord.to_grid(via.x, via.y)
             for layer_idx in range(len(layer_names)):
                 _offer((gx, gy, layer_idx), via.x, via.y)
+        if centre_vias:
+            from geometry_utils import via_on_layer
+            for key, (ox, oy) in list(tap_points.items()):
+                lname = layer_names[key[2]]
+                for via in vias:
+                    r = (getattr(via, 'size', 0.0) or 0.0) / 2.0
+                    if (1e-6 < math.hypot(ox - via.x, oy - via.y) <= r + 1e-9
+                            and via_on_layer(via, lname)):
+                        tap_points[key] = (via.x, via.y)
+                        break
 
     # Return sorted list for deterministic iteration
     return sorted([(gx, gy, layer_idx, ox, oy)
@@ -7070,8 +7321,10 @@ def _route_multipoint_taps_impl(
     obstacles.clear_source_target_cells()
     for _cid, _segs in _p3_segs_by_comp.items():
         _pts = _clear_launch_rows(
-            get_all_segment_tap_points(_segs, coord, layer_names,
-                                       vias=_p3_vias_by_comp.get(_cid, [])),
+            get_all_segment_tap_points(
+                _segs, coord, layer_names,
+                vias=_p3_vias_by_comp.get(_cid, []),
+                centre_vias=getattr(config, 'via_centre_ends', False)),
             obstacles, coord, pcb_data, net_id)
         # Keyed by cell, valued by the OWNER float point (Phase 3's
         # tap_point_map / end-weld contract: weld to the owner of the cell
@@ -7226,7 +7479,8 @@ def _route_multipoint_taps_impl(
             get_all_segment_tap_points(
                 [_s for _s in all_segments if id(_s) not in _pour_taps],
                 coord, layer_names,
-                vias=[_v for _v in all_vias if id(_v) not in _pour_taps]),
+                vias=[_v for _v in all_vias if id(_v) not in _pour_taps],
+                centre_vias=getattr(config, 'via_centre_ends', False)),
             obstacles, coord, pcb_data, net_id)
 
         # Always include the designated source pad position as a potential source
@@ -8040,6 +8294,26 @@ def _path_to_segments_vias(
         merge_end = _merge_terminal_to_exact(path, len(path) - 1, len(path) - 2, end_original, pts,
                                              pcb_data, net_id, config, layer_names)
 
+    # #1235: a layer change meets the barrel that carries it -- the via this
+    # path drills or rides, or an existing same-net via -- at its centre, and
+    # a path through one of the net's vias passes its centre
+    # (config.via_centre_ends). A terminal merged onto its exact endpoint
+    # stays where it is.
+    via_sites = {}
+    if pcb_data is not None and getattr(config, 'via_centre_ends', False):
+        _frozen = {k for k, m in ((0, merge_start), (len(path) - 1, merge_end))
+                   if m}
+        via_sites = _snap_layer_changes_to_barrels(
+            path, pts, coord, layer_names, net_id, config, pcb_data,
+            through_hole_positions, partial_spans, reuse=True, frozen=_frozen,
+            originals={0: start_original, len(path) - 1: end_original})
+        path, pts = _route_through_via_centres(
+            path, pts, layer_names, net_id, config, pcb_data,
+            extra_barrels=_path_barrels(via_sites))
+        _snap_terminals_to_vias(
+            path, pts, layer_names, net_id, config, pcb_data,
+            {0: start_original, len(path) - 1: end_original}, frozen=_frozen)
+
     # Add connecting segment from original start to first path point if needed
     # (skipped when merged: the first path segment now ends at the exact point)
     start_bridge = None
@@ -8084,19 +8358,24 @@ def _path_to_segments_vias(
                     partial_spans.get((gx1, gy1), frozenset()):
                 pass    # a blind/micro via of the net spans both layers
             else:
-                # the grid cell, or the site an unblock checked for it
-                vx, vy = _emit_via_site(pcb_data, gx1, gy1,
-                                        *coord.to_float(gx1, gy1), net_id)
-                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
-                                            net_id=net_id, x=vx, y=vy)
-                # #671: ride an existing same-net barrel rather than drilling a
-                # second one a few tens of um away. Same idea as the
-                # through_hole_positions skip above -- an existing conductor
-                # already provides this transition.
-                _reuse = _reusable_same_net_via(pcb_data, net_id, vx, vy,
-                                                _vdr, config,
-                                                (layer_names[layer1],
-                                                 layer_names[layer2]))
+                _site = via_sites.get((gx1, gy1, layer1, layer2))
+                if _site is not None:
+                    # the barrel the #1235 snap centred this change on
+                    vx, vy, _vsz, _vdr, _reuse = _site
+                else:
+                    # the grid cell, or the site an unblock checked for it
+                    vx, vy = _emit_via_site(pcb_data, gx1, gy1,
+                                            *coord.to_float(gx1, gy1), net_id)
+                    _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
+                                                net_id=net_id, x=vx, y=vy)
+                    # #671: ride an existing same-net barrel rather than
+                    # drilling a second one a few tens of um away. Same idea
+                    # as the through_hole_positions skip above -- an existing
+                    # conductor already provides this transition.
+                    _reuse = _reusable_same_net_via(pcb_data, net_id, vx, vy,
+                                                    _vdr, config,
+                                                    (layer_names[layer1],
+                                                     layer_names[layer2]))
                 if _reuse is not None:
                     if os.environ.get('KICAD_VIA_REUSE_DEBUG') == '1':
                         print(f"      via reuse (#671): net {net_id} rides the "

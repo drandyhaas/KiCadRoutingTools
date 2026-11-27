@@ -1587,7 +1587,7 @@ def _shipped_skew_rows1798(in_run_rows, at_input, shipped):
 
 def _late_strict_collapse1063(pcb_data, output_file, return_results, results_data,
                               write_model, input_signature, scope_names,
-                              keep_input_copper):
+                              keep_input_copper, keep_all_centre_stubs=False):
     """The #1063 strict collapse, ONCE, on the board this run SHIPS.
 
     It used to run inside run_post_route_cleanup, before the plane finalize
@@ -1655,7 +1655,8 @@ def _late_strict_collapse1063(pcb_data, output_file, return_results, results_dat
         _stats = {}
         collapse_strict_redundant(
             [{'new_segments': owned_segs, 'new_vias': owned_vias}], board,
-            scope, keep_input_copper=keep_input_copper, stats=_stats)
+            scope, keep_input_copper=keep_input_copper, stats=_stats,
+            keep_all_centre_stubs=keep_all_centre_stubs)
         kept_s = {id(s) for s in board.segments}
         kept_v = {id(v) for v in board.vias}
         removed = [s for s in before_s if id(s) not in kept_s]
@@ -2633,6 +2634,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 edge_floors=None,
                 rule_via_floors: Optional[dict] = None,
                 power_tap_neckdown: bool = True,
+                via_centre_ends: bool = defaults.VIA_CENTRE_ENDS,
                 neckdown_length: float = 2.5,
                 neckdown_taper_length: float = 0.5,
                 json_out: Optional[str] = None,
@@ -3646,6 +3648,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         debug_memory=debug_memory, layer_costs=layer_costs
     )
     config_kwargs['power_tap_neckdown'] = power_tap_neckdown
+    # #1235: tracks meet a same-net via at its centre, made where each end is
+    # made (GridRouteConfig.via_centre_ends)
+    config_kwargs['via_centre_ends'] = via_centre_ends
     # #1253: the rules the board's design brief declares join the caller's,
     # read here in the engine so the CLI and the GUI both get them with no
     # flag. Only the OUTERMOST call reads the brief: the nested sub-runs (the
@@ -9667,7 +9672,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _gui_write_model, _input_sig1069,
             {pcb_data.nets[_n].name for _n in sweep_scope_ids
              if _n in pcb_data.nets},
-            keep_input_copper)
+            keep_input_copper, keep_all_centre_stubs=via_centre_ends)
+        if via_centre_ends:
+            # #1235: the nets this step laid with centre stubs, recorded at the
+            # step boundary so later steps' collapse and check_weird keep them.
+            from protected_nets import note_via_centre_nets
+            note_via_centre_nets(pcb_data.nets[_n].name for _n in sweep_scope_ids
+                                 if _n in pcb_data.nets and _n)
         # #1525: the dead ends of the nets the in-run cleanup kept as
         # unfinished (#473) and a later pass finished. After the collapse
         # (as the in-run sweep runs after it), before the via sweep, which
@@ -11057,6 +11068,14 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--no-power-tap-neckdown", action="store_true",
                         help="Disable neck-down retry of failed power-net tap edges (issue #72): by default a "
                              "wide tap that cannot fit is re-routed at the layer's default width near the pad")
+    parser.add_argument("--via-centre-ends", action=argparse.BooleanOptionalAction,
+                        default=defaults.VIA_CENTRE_ENDS,
+                        help="A track that ends on, or runs through, a same-net via meets it at the via's "
+                             "CENTRE (#1235): a tap inside a via's copper welds to the centre, a layer change "
+                             "is laid on its barrel's centre, a path through a via passes its centre, and a "
+                             "nudged via takes the run's tracks at its centre along -- each only where the "
+                             "legs clear foreign copper "
+                             f"(default: {'on' if defaults.VIA_CENTRE_ENDS else 'off'})")
     parser.add_argument("--capabilities", action="store_true",
                         help="Print this clone's module and flag inventory as JSON and "
                              "exit. A consumer that pins a KRT clone can only check that "
@@ -11874,6 +11893,7 @@ For differential pair routing, use route_diff.py:
                 power_nets=args.power_nets,
                 power_nets_widths=args.power_nets_widths,
                 power_tap_neckdown=not args.no_power_tap_neckdown,
+                via_centre_ends=args.via_centre_ends,
                 neckdown_length=args.neckdown_length,
                 neckdown_taper_length=args.neckdown_taper_length,
                 json_out=args.json_out,
@@ -12055,6 +12075,9 @@ For differential pair routing, use route_diff.py:
             # #1379: the power widths this step was asked for, measured and disclosed.
             from protected_nets import consume_power_widths, persist_power_widths
             persist_power_widths(_pro, consume_power_widths())
+            # #1235: the nets laid with via-centre ends.
+            from protected_nets import consume_via_centre_nets, persist_via_centre_nets
+            persist_via_centre_nets(_pro, consume_via_centre_nets())
             # #581: an explicit active flag on this step is recorded so later
             # chain steps keep their vias off same-net pads too.
             if getattr(args, 'same_net_pad_clearance', None) is not None \

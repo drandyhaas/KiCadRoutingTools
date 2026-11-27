@@ -52,6 +52,12 @@ POWER_WIDTHS_KEY = "power_widths"
 #: | 'dru' | 'default'} -- what the graders hold a pair to when no
 #: .kicad_dru skew rule binds it (`kicad_dru.recorded_intra_pair_rules`).
 INTRA_KEY = "intra_pair_tolerance"
+#: #1235: the nets a route step laid with --via-centre-ends ({net: true}).
+#: Their tracks meet their vias at the centre, through stubs the strict
+#: collapse would otherwise take as redundant; every later step's collapse
+#: and check_weird keep those stubs on these nets
+#: (cleanup_pipeline._centre_stub_net_ids).
+VIA_CENTRE_KEY = "via_centre_nets"
 #: #1799: the same map carries each AC-coupled chain a route_diff step
 #: matched end to end, keyed AC_CHAIN_PREFIX + its pairs joined by '+':
 #: {'p_nets': [...], 'n_nets': [...] (each side's nets in lane order),
@@ -129,6 +135,15 @@ def note_power_widths(mapping: Dict[str, float]) -> None:
 
 def consume_power_widths() -> Dict[str, float]:
     return _consume(POWER_WIDTHS_KEY)
+
+
+def note_via_centre_nets(names: Iterable[str]) -> None:
+    """Record the nets this step laid with via-centre ends (#1235)."""
+    _note(VIA_CENTRE_KEY, {str(n): True for n in names})
+
+
+def consume_via_centre_nets() -> Dict[str, bool]:
+    return _consume(VIA_CENTRE_KEY)
 
 
 def note_intra_pair_tolerances(mapping: Dict[str, dict]) -> None:
@@ -327,6 +342,21 @@ def persist_power_widths(pro_path: str, mapping: Dict[str, float],
                         {k: round(float(v), 4) for k, v in mapping.items()},
                         "Power-net widths (measured by board_score)", verbose,
                         board=board)
+
+
+def persist_via_centre_nets(pro_path: str, mapping: Dict[str, bool],
+                            verbose: bool = True, board=None) -> bool:
+    return _persist_map(pro_path, VIA_CENTRE_KEY, mapping,
+                        "Via-centre nets (their centre stubs are kept)",
+                        verbose, board=board)
+
+
+def read_via_centre_nets_for_pcb_data(pcb_data,
+                                      input_file: Optional[str] = None) -> Set[str]:
+    """Net names recorded with via-centre ends (#1235) on the board an
+    engine or checker is working on (read_for_pcb_data's discovery)."""
+    m = (_pcb_data_namespace(pcb_data, input_file) or {}).get(VIA_CENTRE_KEY) or {}
+    return {str(k) for k, v in m.items() if v} if isinstance(m, dict) else set()
 
 
 def persist_same_net_pad_clearance(pro_path: str, value: float,

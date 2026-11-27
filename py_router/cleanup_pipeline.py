@@ -150,8 +150,25 @@ def _centre_stub_net_ids(pcb_data):
 
     The length-rule nets are the ones check_drc's length pass grades
     (check_drc.length_rule_nets). The graze passes' read-only set is the
-    same nets (#1759, #1851)."""
-    return set(_skew_bound_net_ids(pcb_data)) | _length_window_net_ids(pcb_data)
+    same nets (#1759, #1851).
+
+    #1235: plus the nets a step recorded as laid with via-centre ends
+    (protected_nets.VIA_CENTRE_KEY), whose stubs are how their tracks meet
+    their vias at the centre."""
+    return (set(_skew_bound_net_ids(pcb_data)) | _length_window_net_ids(pcb_data)
+            | _via_centre_net_ids(pcb_data))
+
+
+def _via_centre_net_ids(pcb_data):
+    """Nets the board's records say were laid with via-centre ends (#1235)."""
+    try:
+        from protected_nets import read_via_centre_nets_for_pcb_data
+        names = read_via_centre_nets_for_pcb_data(pcb_data)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  (#1235 via-centre nets unread, their centre stubs not held: "
+              f"{type(e).__name__}: {e})")
+        return set()
+    return {nid for nid, n in pcb_data.nets.items() if n.name in names} if names else set()
 
 
 def _length_window_net_ids(pcb_data):
@@ -561,7 +578,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         _prog("cycle prune")
         _cy_segs, _cy_nets, _cy_strip = prune_redundant_cycles(
             results, pcb_data, _sub_scope, clearance=config.clearance,
-            keep_input_copper=keep_input_copper)
+            keep_input_copper=keep_input_copper,
+            keep_all_centre_stubs=getattr(config, 'via_centre_ends', False))
         counts['cycles_pruned'] = _cy_segs
         _trace('cycles')
         strip.extend(_cy_strip)
@@ -596,7 +614,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         _prog("strict-redundant collapse")
         _sc_n, _sc_strip = collapse_strict_redundant(
             results, pcb_data, _sub_scope, keep_input_copper=keep_input_copper,
-            stats=_sc_stats)
+            stats=_sc_stats,
+            keep_all_centre_stubs=getattr(config, 'via_centre_ends', False))
     counts['strict_collapsed'] = _sc_n
     counts['strict_collapse_vias'] = _sc_stats.get('vias', 0)
     _trace('strict_collapse')
@@ -748,7 +767,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         _fc_stats = {}
         _fc_n, _fc_strip = collapse_strict_redundant(
             results, pcb_data, _changed, keep_input_copper=keep_input_copper,
-            protect_segment_ids=_close_ids, stats=_fc_stats)
+            protect_segment_ids=_close_ids, stats=_fc_stats,
+            keep_all_centre_stubs=getattr(config, 'via_centre_ends', False))
         counts['strict_collapsed_final'] = _fc_n
         counts['strict_collapse_vias'] = (counts.get('strict_collapse_vias', 0)
                                           + _fc_stats.get('vias', 0))

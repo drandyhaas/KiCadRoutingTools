@@ -413,6 +413,8 @@ BOOL_FLAGS = {
     '--add-gnd-vias': 'add_gnd_vias',
     # route.py's mask-artwork keep-outs (a checkbox of the same name).
     '--mask-keepouts': 'mask_keepouts',
+    # #1235: route.py's via-centre ends (a checkbox of the same name).
+    '--via-centre-ends': 'via_centre_ends',
     # #1630: route.py / route_diff.py record the --impedance target without
     # solving widths (a checkbox of the same name on each tab). A switch, so
     # here and not in FLAG_PARAMS, which would consume the next argument.
@@ -504,6 +506,7 @@ INVERTED_BOOL_FLAGS = {
     '--no-fix-drc-settings': 'fix_drc_check',
     # route.py's mask-artwork keep-outs, on by default (a checkbox).
     '--no-mask-keepouts': 'mask_keepouts',
+    '--no-via-centre-ends': 'via_centre_ends',
 }
 # Repeatable nargs='+' flags (argparse action='append'): each OCCURRENCE is one
 # group, so the plan param is a list of lists. route.py's --length-match-group

@@ -1179,6 +1179,41 @@ Notes:
 - Tested by `tests/test_keepout.py` — flag-off regression, single-net detour, multi-net avoidance,
   and a real bundled board (`kicad_files/lvds_converter_dualclk.kicad_pcb`).
 
+### Tracks Meet Vias at the Centre
+
+A track that ends inside a same-net via's copper but off its centre is connected -- the barrel
+holds it -- so neither connectivity nor DRC sees it, but it reads as a track stopping short of the
+via, and KiCad's length measure runs a track to a via through its centre (#1235). `check_weird`
+reports such ends as the advisory `off-centre-via-end`. With the option on, the route step lays
+each such end at the via's centre where it is made:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--via-centre-ends` / `--no-via-centre-ends` | off | Tracks meet a same-net via at its centre (route.py; GUI: "Tracks meet vias at the centre") |
+
+Notes:
+- A layer change is laid on the centre of the barrel that carries it: the via the step drills
+  (at a via-in-pad unblock's checked site, which can sit off the grid cell), the same-net via it
+  rides (#671), or an existing same-net via.
+- A path end on a via -- a via-in-pad unblock's, or one already on the board -- moves onto the
+  via's centre; a path whose bend sits in a via's disc passes its centre; a tap launched from or
+  landing in a via's copper welds to its centre.
+- A via the post-route nudge moves off its grid cell takes this run's tracks ending at its centre
+  along; a via whose tracks cannot follow (input copper, or a leg that would graze) is not moved.
+- Every move is made only where the legs into the centre clear foreign copper; otherwise the end
+  stays where the search put it.
+- Any end still off a centre after the post-route passes gets a short bridge from inside the via's
+  copper to its centre (the soft-joint pass's via-centre bridge, laid on every net rather than only
+  the length-graded ones). The bridge starts where the track enters the via, or at the end itself
+  when that keeps it inside the via's copper or no closer to foreign copper than the end already
+  is; the strict collapse and the cycle prune keep these stubs.
+- The step records the nets it laid this way in the board's records
+  (`kicad_routing_tools.via_centre_nets`), so later steps' collapse and cycle prune, and
+  `check_weird`, keep their centre stubs too.
+- Off by default: it changes copper, and a default change needs a corpus A/B. It acts in the
+  single-ended route step (route.py and the Route tab); route_diff, the fanouts and the plane
+  steps do not read it.
+
 ### Kelvin Sense Branches (board-declared, no option)
 
 A Kelvin sense trace (a regulator's VOS/feedback divider, a shunt's sense
