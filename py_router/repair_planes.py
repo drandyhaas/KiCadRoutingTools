@@ -1159,11 +1159,12 @@ def _repair_planes_all(
     # tab and plan replays inherit it; see batch_route.
     if input_file:
         try:
-            from fix_kicad_drc_settings import effective_board_edge_clearance
+            from fix_kicad_drc_settings import (effective_board_edge_clearance,
+                                                edge_clearance_source)
             _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
             if _eff_edge > (board_edge_clearance or 0.0):
                 print(f"Board edge clearance {_eff_edge}mm "
-                      f"(project min_copper_edge_clearance)")
+                      f"({edge_clearance_source(input_file)})")
                 board_edge_clearance = _eff_edge
         except Exception:
             pass
@@ -4415,6 +4416,16 @@ Examples:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+    elif (not args.dry_run and args.output_file
+            and os.path.isfile(args.output_file)) and getattr(args, 'escalation', None) == 'off':
+        # --escalation off with the writeback off: name what on the board
+        # sits below its declared rules (input copper -- the router's never
+        # does; with the writeback on, fix_project_for_output names them).
+        try:
+            from fix_kicad_drc_settings import report_below_project_rules
+            report_below_project_rules(args.output_file)
+        except Exception as e:                               # noqa: BLE001
+            print(f"  (skipped the below-rule report: {e})")
 
     # Machine-readable summary (mirrors route.py/route_diff.py) so an orchestrator
     # and the next pipeline step can read the clearance this step actually used.

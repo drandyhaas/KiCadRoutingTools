@@ -3403,11 +3403,12 @@ def create_plane(
     # the GUI planes tab inherits it; see batch_route).
     if input_file:
         try:
-            from fix_kicad_drc_settings import effective_board_edge_clearance
+            from fix_kicad_drc_settings import (effective_board_edge_clearance,
+                                                edge_clearance_source)
             _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
             if _eff_edge > (board_edge_clearance or 0.0):
                 print(f"Board edge clearance {_eff_edge}mm "
-                      f"(project min_copper_edge_clearance)")
+                      f"({edge_clearance_source(input_file)})")
                 board_edge_clearance = _eff_edge
         except Exception:
             pass
@@ -5115,6 +5116,15 @@ Examples:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+    elif _wrote_output and getattr(args, 'escalation', None) == 'off':
+        # --escalation off with the writeback off: name what on the board
+        # sits below its declared rules (input copper -- the router's never
+        # does; with the writeback on, fix_project_for_output names them).
+        try:
+            from fix_kicad_drc_settings import report_below_project_rules
+            report_below_project_rules(args.output_file)
+        except Exception as e:                               # noqa: BLE001
+            print(f"  (skipped the below-rule report: {e})")
     if _wrote_output:
         # #581: record an ACTIVE same-net pad via clearance in the output's
         # project so every later chain step keeps its vias off same-net pads

@@ -5220,9 +5220,12 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
 
     def _via_clr(expanded):
         # A via barrel meets this pad's copper on every layer the pad carries
-        # it -> stack max of the per-layer resolution.
-        return max((_layer_clr(l) for l in expanded if l.endswith('.Cu')),
-                   default=max(clearance, lc))
+        # it -> stack max of the per-layer resolution; its DRILL keeps the
+        # board's copper-to-hole floor off the pad even where the pad's own
+        # override relaxes copper clearance (_via_hole_copper_floor).
+        return max(max((_layer_clr(l) for l in expanded if l.endswith('.Cu')),
+                       default=max(clearance, lc)),
+                   _via_hole_copper_floor(config))
 
     if lc > clearance:
         clearance = lc
@@ -5324,6 +5327,37 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         _batch_vias(obstacles, via_cells, blocked_vias, sink=via_sink)
 
 
+def graded_via_hole_clearance(pcb_data, input_file) -> float:
+    """The copper-to-hole floor KiCad grades the INPUT board's vias at, when
+    the run must route to it (fab_tiers.routes_to_graded_rules: no project
+    written under --no-fix-drc-settings, or the rules promised under
+    --escalation off): the board's declared ``min_hole_clearance``
+    (obstacle_map.declared_hole_clearance), else KiCad's factory 0.25 mm,
+    which is what it loads for a rule the project leaves out. 0.0 otherwise:
+    the writeback records the hole clearance the run routed to, so the
+    shipped board is graded at that. Both routing engines install it on
+    their config (route.batch_route, route_diff.batch_route_diff_pairs)."""
+    import fab_tiers
+    if not fab_tiers.routes_to_graded_rules():
+        return 0.0
+    v, _src = declared_hole_clearance(pcb_data, input_file)
+    if v and v > 0:
+        return float(v)
+    from plane_fill_model import KICAD_FACTORY_HOLE_CLEARANCE
+    return float(KICAD_FACTORY_HOLE_CLEARANCE)
+
+
+def _via_hole_copper_floor(config) -> float:
+    """The via-copper to foreign-pad-copper distance that keeps a via's
+    DRILL ``config.via_hole_clearance`` off the pad: that floor less the via's
+    annular ring. 0.0 when unset."""
+    hc = getattr(config, 'via_hole_clearance', 0.0) or 0.0
+    if hc <= 0:
+        return 0.0
+    ring = max(0.0, (config.via_size - config.via_drill) / 2.0)
+    return max(0.0, hc - ring)
+
+
 def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
                            extra_clearance: float = 0.0):
     """The grid cells a via CENTER must avoid to clear `pad` (via half-size +
@@ -5351,6 +5385,7 @@ def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
     # A pad override REPLACES the resolved value (floored at the board
     # minimum), it is not a floor on top of it -- KiCad semantics, measured.
     clearance = config.pad_override_clearance(clearance, pad)
+    clearance = max(clearance, _via_hole_copper_floor(config))
     if pad.shape in ('circle', 'oval'):
         corner_radius = min(half_width, half_height)
     elif pad.shape == 'roundrect':

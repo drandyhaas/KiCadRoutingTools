@@ -293,6 +293,12 @@ class GridRouteConfig:
     # check_drc already read min_hole_clearance, so on a board declaring 0.25 the
     # router would happily route into a band its own checker then flagged.
     hole_clearance: float = 0.0
+    # mm - copper-to-hole KiCad grades a VIA's own drill at against foreign
+    # copper (`min_hole_clearance`: the project's, else KiCad's factory 0.25,
+    # when the run writes no project or runs under --escalation off). A pad
+    # whose clearance override is below it still keeps a via's hole this far
+    # off its copper. 0 = unset.
+    via_hole_clearance: float = 0.0
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     # Power-tap neck-down (issue #72): when a wide power-net tap edge fails,
     # retry it at the layer's default track width. Within neckdown_length mm
