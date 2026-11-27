@@ -3220,9 +3220,30 @@ def _gnd_base(name: str) -> str:
     return name.rsplit('/', 1)[-1].upper()
 
 
+@functools.lru_cache(maxsize=None)
+def _declared_patterns(spec: str) -> Tuple[str, ...]:
+    return tuple(p.strip().upper() for p in spec.split(',') if p.strip())
+
+
+def is_declared_net(name: str, env_key: str) -> bool:
+    """True if the net's leaf matches one of the comma-separated, case-insensitive
+    fnmatch patterns in environment variable `env_key` (KRT_GROUND_NETS,
+    KRT_POWER_NETS). A board whose rails do not follow the GND / VCC / +3V3 shapes
+    (for example ISO_GND or ISO_3V3 on an isolated design) declares them instead
+    of being guessed; a name rule wide enough to catch `ISO_GND` would also take
+    a signal such as `SW_GND_SENSE` for ground. Unset or empty variables declare
+    nothing, so the name rules stand alone."""
+    pats = _declared_patterns(os.environ.get(env_key, ''))
+    if not pats or not name:
+        return False
+    leaf = _gnd_base(name)
+    return any(fnmatch.fnmatchcase(leaf, p) for p in pats)
+
+
 def is_ground_net_name(name: str) -> bool:
     """True if a net name is in the GND family (GND, /GND, GNDA, AGND, DGND,
     PGND, GND_D, GND1, ...); the sheet-path prefix is stripped first (#379).
+    A net declared in KRT_GROUND_NETS is ground whatever its spelling.
 
     KNOWN and deliberately not widened: this does NOT match `VSS`, while
     `list_nets.find_power_nets` calls VSS ground. No tracked board names a net
@@ -3232,7 +3253,8 @@ def is_ground_net_name(name: str) -> bool:
     read. Consumers that care must say which spelling they mean.
     """
     b = _gnd_base(name)
-    return b.startswith('GND') or b in _GND_SUFFIX_NAMES
+    return (b.startswith('GND') or b in _GND_SUFFIX_NAMES
+            or is_declared_net(name, 'KRT_GROUND_NETS'))
 
 
 #: Pin-FUNCTION names that mean "supply" (#705). Lifted verbatim from the
@@ -3327,9 +3349,12 @@ _POWER_NET_RE = re.compile(r'^(a?gnd|dgnd|pgnd|vcc|vdd|vss|vee|vbus|vin|vout|'
 
 
 def is_power_net_name(name: str) -> bool:
-    """True if a net name LOOKS like a rail or a return, by its leaf."""
+    """True if a net name LOOKS like a rail or a return, by its leaf, or is
+    declared one (KRT_POWER_NETS, KRT_GROUND_NETS)."""
     leaf = (name or '').split('/')[-1]
-    return bool(leaf) and bool(_POWER_NET_RE.match(leaf))
+    return bool(leaf) and (bool(_POWER_NET_RE.match(leaf))
+                           or is_declared_net(name, 'KRT_POWER_NETS')
+                           or is_declared_net(name, 'KRT_GROUND_NETS'))
 
 
 def resolve_gnd_net_id(pcb_data: PCBData,
