@@ -11,11 +11,17 @@ The repair must join the two GND halves through that gap. On main, under
 * off, two GND zone polygons, 3.0 mm gap: main widened the join to 0.8 mm;
   it is not stopped at the net's 0.6 mm (the first version of this fix
   widened from 0.6 to 1.2 and stopped at 0.6);
-* fab: the same joins as before (0.4 mm, 0.2 mm).
+* fab: the same joins as before (0.4 mm, 0.2 mm);
+* off, 0.9 mm gap, GND's 0.6 mm from a .kicad_dru rule rather than
+  --power-nets: the guaranteed-join gate used to cross the gap at the run's
+  --track-width after the joins had refused it, and the CLI's oracle width
+  map carried no rule width. Now no GND copper below 0.6 mm crosses, and
+  the oracle map holds GND at 0.6.
 
 The KiCad-oracle recheck is off here (--no-kicad-recheck), so this runs
 without KiCad.
 """
+import json
 import os
 import re
 import subprocess
@@ -62,7 +68,14 @@ def _two_zones(text):
             + zone(2, FENCE_X + 0.5, 129.525) + text[i + 1:])
 
 
-def _board(td, gap, two_polygons=False):
+GND_DRU = """(version 1)
+(rule "gnd"
+  (constraint track_width (min 0.2mm) (opt 0.6mm))
+  (condition "A.NetName == '/GND'"))
+"""
+
+
+def _board(td, gap, two_polygons=False, dru=None):
     half = gap / 2 + 0.125
     text = BOARD.read_text(encoding='utf-8').rstrip()
     fence = (_seg(FENCE_X, 50.2, FENCE_X, 84.8, 'B.Cu', 1)
@@ -74,26 +87,54 @@ def _board(td, gap, two_polygons=False):
     path = os.path.join(td, 'in.kicad_pcb')
     with open(path, 'w', encoding='utf-8') as f:
         f.write(text)
+    if dru:
+        with open(os.path.join(td, 'in.kicad_dru'), 'w', encoding='utf-8') as f:
+            f.write(dru)
     return path
 
 
-def _repair(gap, policy, two_polygons=False):
-    """Widths of the new F.Cu GND copper that crosses the fence."""
+# Runs the standalone CLI's main() in-process, then prints the oracle width
+# map it built (repair_planes.LAST_NET_WIDTHS_BY_NAME) on a marked line.
+_MAIN_AND_MAP = (
+    "import json, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "sys.argv = ['repair_planes.py'] + sys.argv[2:]\n"
+    "import repair_planes\n"
+    "rc = repair_planes.main()\n"
+    "print('ORACLE_WIDTH_MAP: ' + json.dumps("
+    "repair_planes.LAST_NET_WIDTHS_BY_NAME))\n"
+    "sys.exit(rc or 0)\n")
+
+
+def _run(gap, policy, two_polygons=False, dru=None):
+    """(widths of the new GND copper that crosses the fence on F.Cu, the
+    CLI's oracle width map). Without ``dru`` GND asks 0.6 mm through
+    --power-nets; with it, through the rule alone."""
     with tempfile.TemporaryDirectory() as td:
-        board = _board(td, gap, two_polygons)
+        board = _board(td, gap, two_polygons, dru)
         out = os.path.join(td, 'out.kicad_pcb')
+        power = ([] if dru else
+                 ['--power-nets', '/GND', '--power-nets-widths', '0.6'])
         r = subprocess.run(
-            [sys.executable, str(ROOT / 'py_router' / 'repair_planes.py'),
+            [sys.executable, '-c', _MAIN_AND_MAP, str(ROOT / 'py_router'),
              board, out, '--nets', '/GND', '--plane-layers', 'B.Cu',
-             '--escalation', policy, '--power-nets', '/GND',
-             '--power-nets-widths', '0.6', '--no-kicad-recheck'],
+             '--escalation', policy, '--no-kicad-recheck'] + power,
             capture_output=True, text=True, timeout=1200)
         assert r.returncode == 0, (r.stdout + r.stderr)[-3000:]
+        line = [l for l in r.stdout.splitlines()
+                if l.startswith('ORACLE_WIDTH_MAP: ')]
+        assert line, "the run printed no oracle width map: " + r.stdout[-2000:]
         pcb = parse_kicad_pcb(out)
         gnd = next(n for n, net in pcb.nets.items() if net.name == '/GND')
-        return sorted({round(s.width, 3) for s in pcb.segments
-                       if s.net_id == gnd and s.layer == 'F.Cu'
-                       and min(s.start_x, s.end_x) < FENCE_X < max(s.start_x, s.end_x)})
+        return (sorted({round(s.width, 3) for s in pcb.segments
+                        if s.net_id == gnd and s.layer == 'F.Cu'
+                        and min(s.start_x, s.end_x) < FENCE_X
+                        < max(s.start_x, s.end_x)}),
+                json.loads(line[-1][len('ORACLE_WIDTH_MAP: '):]))
+
+
+def _repair(gap, policy, two_polygons=False):
+    return _run(gap, policy, two_polygons)[0]
 
 
 def test_off_crosses_at_the_nets_width():
@@ -113,10 +154,21 @@ def test_fab_is_unchanged():
     assert _repair(0.9, 'fab') == [0.2]
 
 
+def test_off_holds_a_rule_width_in_the_gate_and_the_oracle_map():
+    widths, oracle_map = _run(0.9, 'off', dru=GND_DRU)
+    under = [w for w in widths if w < 0.6 - 1e-6]
+    assert not under, (f"GND copper below its .kicad_dru 0.6 mm crosses the "
+                       f"fence under off: {widths}")
+    got = (oracle_map.get('net_track_widths') or {}).get('/GND')
+    assert got == 0.6, (f"the CLI's oracle width map does not hold GND at its "
+                        f"rule's 0.6 mm: {oracle_map}")
+
+
 TESTS = [test_off_crosses_at_the_nets_width,
          test_off_lays_nothing_narrower_through_a_narrow_gap,
          test_off_is_not_narrower_than_main_on_two_polygons,
-         test_fab_is_unchanged]
+         test_fab_is_unchanged,
+         test_off_holds_a_rule_width_in_the_gate_and_the_oracle_map]
 
 if __name__ == '__main__':
     for t in TESTS:

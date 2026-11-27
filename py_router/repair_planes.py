@@ -948,10 +948,17 @@ def _plane_join_width_resolver(config, pcb_data, input_file, net_ids,
                         nlw[nid] = xl
         wcfg = replace(config, net_track_widths=ntw, net_layer_widths=nlw)
 
+        def own_width(nid, layers):
+            return max(wcfg.get_net_track_width(nid, l) for l in layers)
+
         def resolve(nid, layers):
-            return plane_join_widths(
-                policy, min_w, max_w, default_w,
-                max(wcfg.get_net_track_width(nid, l) for l in layers))
+            return plane_join_widths(policy, min_w, max_w, default_w,
+                                     own_width(nid, layers))
+        # Under off the other legs that lay this net's copper read the same
+        # widths: the guaranteed-join gate draws at own_width, and the CLI's
+        # oracle recheck gets width_config's maps.
+        resolve.own_width = own_width
+        resolve.width_config = wcfg
         return resolve
 
     board_floor = float(floors.get('track_width') or 0.0)
@@ -1321,7 +1328,8 @@ def _repair_planes_all(
         design_rules=join_design_rules)
     if pcb_data is not None:
         from kicad_oracle import oracle_net_widths_by_name
-        LAST_NET_WIDTHS_BY_NAME = oracle_net_widths_by_name(config, pcb_data.nets)
+        LAST_NET_WIDTHS_BY_NAME = oracle_net_widths_by_name(
+            getattr(_join_widths, 'width_config', config), pcb_data.nets)
     # #581: keep repair vias (pad taps, region joins, reconnects) off same-net
     # pads when the constraint is active. Explicit kwarg wins (route.py's #562
     # finalize forwards its resolved value -- the output's .kicad_pro sibling
@@ -3040,10 +3048,17 @@ def _repair_planes_all(
                 # The repair edited pcb_data's copper in place: invalidate what was
                 # cached against it before the sub-run looks anything up (#1146 audit).
                 bump_copper_epoch(pcb_data)
+                # Under --escalation off the gate holds the net to the width
+                # its region joins were held to (net class, .kicad_dru,
+                # power width): at track_width it re-crossed the gaps the
+                # joins had refused.
+                _own3 = getattr(_join_widths, 'own_width', None)
+                _gate_tw = (max(track_width, _own3(_nid, routing_layers))
+                            if _own3 else track_width)
                 _ok3, _fail3, _t3, _rdata3 = batch_route(
                     input_file, "", [_nname],
                     layers=routing_layers,
-                    track_width=track_width, clearance=clearance,
+                    track_width=_gate_tw, clearance=clearance,
                     via_size=via_size, via_drill=via_drill,
                     grid_step=grid_step,
                     power_nets=power_nets, power_nets_widths=power_nets_widths,
