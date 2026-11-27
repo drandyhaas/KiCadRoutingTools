@@ -12,11 +12,20 @@ route to those rules:
    the fab floor (0.2 mm) does so under fab, and goes round under off.
 2. via hole to pad copper: config.via_hole_clearance keeps a via's DRILL that
    floor off a pad, even where the pad's clearance override is smaller.
-3. route._graded_via_hole_clearance resolves that floor: the declared rule,
-   else the factory 0.25 mm when no project is written.
+3. obstacle_map.graded_via_hole_clearance resolves that floor when no
+   project is written: the declared rule, else the factory 0.25 mm. Under
+   fab it is unset: the writeback records the floor the run routed to.
 4. close_soft_joints refuses a bridge inside another net's FILLED footprint
    copper (an SOT tab drawn as a polygon), and keeps a bridge of the net the
    tab's own pad gives it, as the obstacle map does.
+
+5. End to end, both routing engines: a via squeezed between BLK walls with a
+   0.05 mm clearance override keeps its drill 0.25 mm off the walls under
+   off (route.py and route_diff.py). Control: under fab route.py may keep
+   the via there, and the writeback lowers min_hole_clearance to what it
+   holds, so the default does not change.
+6. The console line that announces a raised edge clearance names KiCad's
+   factory value, not the project, when the project declares no rule.
 
 Controls: under fab (the writeback on) items 1 and 3 do not change.
 
@@ -209,9 +218,9 @@ def t_via_hole_keepout():
 
 
 def t_graded_via_hole(tmp):
-    print("3. route._graded_via_hole_clearance")
+    print("3. obstacle_map.graded_via_hole_clearance")
     from kicad_parser import parse_kicad_pcb
-    from route import _graded_via_hole_clearance
+    from obstacle_map import graded_via_hole_clearance
     bare = _write(os.path.join(tmp, 'vh_bare.kicad_pcb'),
                   RoutingBoard(w=20, h=20).text())
     decl = _write(os.path.join(tmp, 'vh_decl.kicad_pcb'),
@@ -219,13 +228,16 @@ def t_graded_via_hole(tmp):
     _project(os.path.splitext(decl)[0] + '.kicad_pro', {"min_hole_clearance": 0.3})
     pb, pd = parse_kicad_pcb(bare), parse_kicad_pcb(decl)
     _policy('off')
-    got = _graded_via_hole_clearance(pb, bare)
+    got = graded_via_hole_clearance(pb, bare)
     check("off, no project: KiCad's factory 0.25", abs(got - 0.25) < 1e-9, f'{got}')
-    got = _graded_via_hole_clearance(pd, decl)
+    got = graded_via_hole_clearance(pd, decl)
     check("off, project declares 0.3: 0.3", abs(got - 0.3) < 1e-9, f'{got}')
     _policy('fab')
-    got = _graded_via_hole_clearance(pb, bare)
+    got = graded_via_hole_clearance(pb, bare)
     check("control: fab, no project: unset (the writeback records the floor)",
+          got == 0.0, f'{got}')
+    got = graded_via_hole_clearance(pd, decl)
+    check("control: fab, project declares 0.3: unset (the default is unchanged)",
           got == 0.0, f'{got}')
 
 
@@ -277,6 +289,179 @@ def t_filled_bridge(tmp):
           len(bridged['GND']) == 1, f"{len(bridged['GND'])} bridge(s)")
 
 
+# ------------------------------------------- 5. via drill vs pad, end to end
+PRO_VIA = {"board": {"design_settings": {"rules": {
+               "min_clearance": 0.05, "min_hole_clearance": 0.25,
+               "min_copper_edge_clearance": 0.3, "min_track_width": 0.1,
+               "min_via_diameter": 0.4, "min_via_drill": 0.2,
+               "min_through_hole_diameter": 0.2, "min_via_annular_width": 0.1,
+               "min_hole_to_hole": 0.25},
+           "rule_severities": {}}},
+           "meta": {"filename": "in.kicad_pro", "version": 1},
+           "net_settings": {"classes": [{"name": "Default", "clearance": 0.1,
+                                         "track_width": 0.15, "via_diameter": 0.45,
+                                         "via_drill": 0.2}],
+                            "meta": {"version": 3}}}
+
+
+def _fp(ref, x, y, pad):
+    return ('  (footprint "synth:P" (layer "F.Cu") (uuid "fp-%s") (at %s %s)\n'
+            '    (property "Reference" "%s" (at 0 -1.5 0) (layer "F.SilkS") '
+            '(uuid "r-%s")\n      (effects (font (size 0.5 0.5) (thickness 0.1))))'
+            '\n    %s\n  )' % (ref, x, y, ref, ref, pad))
+
+
+def _smd(net_id, net, layer, sx, sy, uid, extra=''):
+    mask = 'F.Mask' if layer == 'F.Cu' else 'B.Mask'
+    return ('(pad "1" smd rect (at 0 0) (size %s %s) (layers "%s" "%s") '
+            '(net %d "%s")%s (uuid "%s"))' % (sx, sy, layer, mask, net_id, net,
+                                              extra, uid))
+
+
+def _via_board(d, nets, pads):
+    """A 20 x 20 two-layer board with `pads` [(ref, x, y, pad)] and PRO_VIA."""
+    txt = ['(kicad_pcb (version 20241229) (generator "synth") '
+           '(generator_version "9.0")',
+           '  (general (thickness 1.6) (legacy_teardrops no))', '  (paper "A4")',
+           '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user) '
+           '(39 "F.Mask" user) (38 "B.Mask" user) (44 "Edge.Cuts" user))',
+           '  (setup (pad_to_mask_clearance 0))']
+    txt += ['  (net %d "%s")' % (i, n) for i, n in enumerate([''] + nets)]
+    txt += [_fp(*p) for p in pads]
+    txt.append('  (gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts") '
+               '(stroke (width 0.1) (type solid)) (fill none) (uuid "edge"))\n)\n')
+    pcb = _write(os.path.join(d, 'in.kicad_pcb'), '\n'.join(txt))
+    with open(os.path.join(d, 'in.kicad_pro'), 'w', encoding='utf-8') as f:
+        json.dump(PRO_VIA, f, indent=2)
+    return pcb
+
+
+def _walls(net_id, wl, wr, top, bottom=None):
+    """BLK walls (clearance override 0.05) left of x=wl, right of x=wr and
+    above y=top (and below y=bottom: a closed box)."""
+    o = ' (clearance 0.05)'
+    mid, w = (wl + wr) / 2.0, wr - wl + 2.0
+    out = [('W1', wl - 0.5, 10, _smd(net_id, 'BLK', 'F.Cu', 1.0, 6.0, 'w1', o)),
+           ('W2', wr + 0.5, 10, _smd(net_id, 'BLK', 'F.Cu', 1.0, 6.0, 'w2', o)),
+           ('W3', mid, top - 0.3, _smd(net_id, 'BLK', 'F.Cu', w, 0.6, 'w3', o))]
+    if bottom is not None:
+        out.append(('W4', mid, bottom + 0.3,
+                    _smd(net_id, 'BLK', 'F.Cu', w, 0.6, 'w4', o)))
+    return out
+
+
+def _route(tool, inp, out, nets, esc):
+    env = dict(os.environ, KICAD_PLANE_FINALIZE='0')
+    r = subprocess.run([sys.executable, '-X', 'utf8',
+                        os.path.join(ROOT, 'py_router', tool), inp, out,
+                        '--nets', nets, '--escalation', esc],
+                       capture_output=True, text=True, env=env)
+    ok = r.returncode == 0 and os.path.isfile(out)
+    if not ok:
+        print(f"    {tool} exit {r.returncode}\n{(r.stdout or '')[-1500:]}"
+              f"{(r.stderr or '')[-1500:]}")
+    return ok
+
+
+def _via_hole_to_blk(out):
+    """(smallest distance from a via's DRILL to BLK pad copper, via count)."""
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(out)
+    blk = [p for fp in pcb.footprints.values() for p in fp.pads
+           if p.net_name == 'BLK']
+    best = None
+    for v in pcb.vias:
+        for p in blk:
+            dx = max(abs(v.x - p.global_x) - p.size_x / 2.0, 0.0)
+            dy = max(abs(v.y - p.global_y) - p.size_y / 2.0, 0.0)
+            gap = (dx * dx + dy * dy) ** 0.5 - v.drill / 2.0
+            best = gap if best is None else min(best, gap)
+    return best, len(pcb.vias)
+
+
+def _hole_rule(out):
+    with open(os.path.splitext(out)[0] + '.kicad_pro', encoding='utf-8') as f:
+        return json.load(f)['board']['design_settings']['rules'].get(
+            'min_hole_clearance')
+
+
+def t_via_route(tmp):
+    """SIG from pad A (F.Cu, in a 0.67 mm channel between BLK walls) to pad B
+    (B.Cu). A 0.45/0.2 via in the channel keeps 0.11 mm copper to a wall
+    (legal at the 0.1 clearance) but its drill only 0.235 mm."""
+    print("5a. route.py: via drill vs a pad with a clearance override")
+    d = os.path.join(tmp, 'via_se')
+    os.makedirs(d)
+    pads = [('A', 5, 10, _smd(1, 'SIG', 'F.Cu', 0.4, 0.4, 'pa')),
+            ('B', 15, 10, _smd(1, 'SIG', 'B.Cu', 0.4, 0.4, 'pb'))]
+    pads += _walls(2, 4.665, 5.335, 7.6)
+    inp = _via_board(d, ['SIG', 'BLK'], pads)
+    res = {}
+    for esc in ('off', 'fab'):
+        out = os.path.join(d, f'out_{esc}.kicad_pcb')
+        if not _route('route.py', inp, out, 'SIG', esc):
+            check(f"route.py {esc} ran", False)
+            return
+        res[esc] = _via_hole_to_blk(out) + (_hole_rule(out),)
+    gap, n, rule = res['off']
+    check("off: SIG took a via", n >= 1, f'{n}')
+    check("off: every via drill keeps 0.25 mm off the BLK walls",
+          gap is not None and gap >= 0.25 - 1e-3, f'{gap:.3f} mm' if gap else '')
+    check("off: min_hole_clearance ships as declared", rule == 0.25, f'{rule}')
+    gap, n, rule = res['fab']
+    check("control: fab keeps the via in the channel (drill under 0.25 mm)",
+          gap is not None and gap < 0.25 - 1e-3, f'{gap:.3f} mm' if gap else '')
+    check("control: fab's writeback lowers min_hole_clearance to what it holds",
+          rule is not None and gap is not None and rule <= gap + 1e-3,
+          f'rule {rule}, drill gap {gap:.3f}' if gap else f'{rule}')
+
+
+def t_via_route_diff(tmp):
+    """Pair DP from F.Cu pads in a closed BLK box to B.Cu pads: its vias must
+    stand in the box, where the walls are 0.335 mm from where the pair puts
+    them without the floor."""
+    print("5b. route_diff.py: via drill vs a pad with a clearance override")
+    d = os.path.join(tmp, 'via_dp')
+    os.makedirs(d)
+    wl, wr = 4.39, 5.61
+    mid = (wl + wr) / 2.0
+    pads = [('P1', round(mid - 0.3, 4), 8, _smd(1, 'DP_P', 'F.Cu', 0.3, 0.3, 'p1')),
+            ('N1', round(mid + 0.3, 4), 8, _smd(2, 'DP_N', 'F.Cu', 0.3, 0.3, 'n1')),
+            ('P2', 16, 12.7, _smd(1, 'DP_P', 'B.Cu', 0.3, 0.3, 'p2')),
+            ('N2', 16, 13.3, _smd(2, 'DP_N', 'B.Cu', 0.3, 0.3, 'n2'))]
+    pads += _walls(3, wl, wr, 7.0, 13.0)
+    inp = _via_board(d, ['DP_P', 'DP_N', 'BLK'], pads)
+    out = os.path.join(d, 'out_off.kicad_pcb')
+    if not _route('route_diff.py', inp, out, 'DP_*', 'off'):
+        check("route_diff.py off ran", False)
+        return
+    gap, n = _via_hole_to_blk(out)
+    check("off: the pair took vias", n >= 2, f'{n}')
+    check("off: every via drill keeps 0.25 mm off the BLK walls",
+          gap is not None and gap >= 0.25 - 1e-3, f'{gap:.3f} mm' if gap else '')
+
+
+# ------------------------------------------------- 6. the edge console line
+def t_edge_source(tmp):
+    print("6. the edge-clearance console line names its source")
+    from fix_kicad_drc_settings import edge_clearance_source
+    bare = _write(os.path.join(tmp, 'src_bare.kicad_pcb'),
+                  RoutingBoard(w=20, h=20).text())
+    decl = _write(os.path.join(tmp, 'src_decl.kicad_pcb'),
+                  RoutingBoard(w=20, h=20).text())
+    _project(os.path.splitext(decl)[0] + '.kicad_pro',
+             {"min_copper_edge_clearance": 0.4})
+    _policy('off')
+    got = edge_clearance_source(bare)
+    check("off, no project: KiCad's factory value", 'factory' in got, got)
+    got = edge_clearance_source(decl)
+    check("off, declared rule: the project", got.startswith('project'), got)
+    _policy('fab')
+    got = edge_clearance_source(bare)
+    check("control: fab: the project (the writeback records the rule)",
+          got.startswith('project'), got)
+
+
 def main():
     import fab_tiers
     prev = fab_tiers.get_escalation_policy()
@@ -287,6 +472,9 @@ def main():
             t_via_hole_keepout()
             t_graded_via_hole(tmp)
             t_filled_bridge(tmp)
+            t_via_route(tmp)
+            t_via_route_diff(tmp)
+            t_edge_source(tmp)
     finally:
         fab_tiers.set_escalation_policy(*prev)
     if FAILS:

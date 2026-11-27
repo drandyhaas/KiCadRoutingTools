@@ -5082,6 +5082,25 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         _batch_vias(obstacles, via_cells, blocked_vias, sink=via_sink)
 
 
+def graded_via_hole_clearance(pcb_data, input_file) -> float:
+    """The copper-to-hole floor KiCad grades this run's vias at when the run
+    writes no project (fab_tiers.project_writeback False, as under
+    --escalation off): the board's declared ``min_hole_clearance``
+    (obstacle_map.declared_hole_clearance), else KiCad's factory 0.25 mm,
+    which is what it loads for a rule the project leaves out. 0.0 when the
+    writeback runs: it records the hole clearance the run routed to, so the
+    shipped board is graded at that. Both routing engines install it on
+    their config (route.batch_route, route_diff.batch_route_diff_pairs)."""
+    import fab_tiers
+    if fab_tiers.project_writeback():
+        return 0.0
+    v, _src = declared_hole_clearance(pcb_data, input_file)
+    if v and v > 0:
+        return float(v)
+    from plane_fill_model import KICAD_FACTORY_HOLE_CLEARANCE
+    return float(KICAD_FACTORY_HOLE_CLEARANCE)
+
+
 def _via_hole_copper_floor(config) -> float:
     """The via-copper to foreign-pad-copper distance that keeps a via's
     DRILL ``config.via_hole_clearance`` off the pad: that floor less the via's

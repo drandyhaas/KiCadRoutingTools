@@ -576,6 +576,22 @@ def effective_board_edge_clearance(pcb_path: str, cli_value: float,
     return max(base, fab_edge_floor(pcb_path)) if fab_floor else base
 
 
+def _declared_edge_rule(pcb_path: str):
+    """The project's ``rules.min_copper_edge_clearance`` as declared: a
+    float (0.0 for a declared 0, "no check"), or None when the project
+    leaves it out or there is no project."""
+    pro = find_project(pcb_path)
+    if not os.path.isfile(pro):
+        return None
+    with open(pro) as f:
+        rules = ((json.load(f).get('board') or {}).get('design_settings')
+                 or {}).get('rules') or {}
+    if 'min_copper_edge_clearance' not in rules:
+        return None
+    v = rules.get('min_copper_edge_clearance')
+    return float(v) if isinstance(v, (int, float)) and v > 0 else 0.0
+
+
 def _graded_edge_clearance(pcb_path: str) -> float:
     """What KiCad grades copper-to-edge at when this run writes no project
     (fab_tiers.project_writeback False: --escalation off, --no-fix-drc-settings):
@@ -588,17 +604,29 @@ def _graded_edge_clearance(pcb_path: str) -> float:
         import fab_tiers
         if fab_tiers.project_writeback():
             return 0.0
-        pro = find_project(pcb_path)
-        if os.path.isfile(pro):
-            with open(pro) as f:
-                rules = ((json.load(f).get('board') or {}).get('design_settings')
-                         or {}).get('rules') or {}
-            if 'min_copper_edge_clearance' in rules:
-                v = rules.get('min_copper_edge_clearance')
-                return float(v) if isinstance(v, (int, float)) and v > 0 else 0.0
+        declared = _declared_edge_rule(pcb_path)
+        if declared is not None:
+            return declared
         return float(fab_tiers.KICAD_FACTORY_RULES.get('min_copper_edge_clearance') or 0.0)
     except Exception:                                          # noqa: BLE001
         return 0.0
+
+
+def edge_clearance_source(pcb_path: str) -> str:
+    """Where the copper-to-edge value that
+    :func:`effective_board_edge_clearance` raised the run to comes from, for
+    the console line that announces it: KiCad's factory value when the run
+    writes no project and the project declares no rule, else the project's
+    rule."""
+    try:
+        import fab_tiers
+        if (not fab_tiers.project_writeback()
+                and _declared_edge_rule(pcb_path) is None):
+            return ("KiCad's factory min_copper_edge_clearance: the project "
+                    "declares none and this run writes no project")
+    except Exception:                                          # noqa: BLE001
+        pass
+    return "project min_copper_edge_clearance"
 
 
 # Rules that describe what the FAB can make, as opposed to how the board is

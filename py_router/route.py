@@ -972,23 +972,6 @@ def _write_summary_min_file(json_out: Optional[str], status: str,
               f"{type(_e).__name__}: {_e}")
 
 
-def _graded_via_hole_clearance(pcb_data, input_file) -> float:
-    """The copper-to-hole floor KiCad grades this run's vias at: the board's
-    declared ``min_hole_clearance`` (obstacle_map.declared_hole_clearance),
-    else -- when the run writes no project (fab_tiers.project_writeback False,
-    as under --escalation off) -- KiCad's factory 0.25 mm, which is what it
-    loads for a rule the project leaves out. 0.0 otherwise."""
-    from obstacle_map import declared_hole_clearance
-    import fab_tiers
-    v, _src = declared_hole_clearance(pcb_data, input_file)
-    if v and v > 0:
-        return float(v)
-    if not fab_tiers.project_writeback():
-        from plane_fill_model import KICAD_FACTORY_HOLE_CLEARANCE
-        return float(KICAD_FACTORY_HOLE_CLEARANCE)
-    return 0.0
-
-
 def _ship_via_protection962(pcb_data, output_file, return_results, results_data,
                             input_snapshot):
     """Declare IPC-4761 Type VII on the shipped vias that need it (#962).
@@ -3008,11 +2991,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # --board-edge-clearance still wins (max).
     if input_file:
         try:
-            from fix_kicad_drc_settings import effective_board_edge_clearance
+            from fix_kicad_drc_settings import (effective_board_edge_clearance,
+                                                edge_clearance_source)
             _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
             if _eff_edge > (board_edge_clearance or 0.0):
                 print(f"Board edge clearance {_eff_edge}mm "
-                      f"(project min_copper_edge_clearance)")
+                      f"({edge_clearance_source(input_file)})")
                 board_edge_clearance = _eff_edge
         except Exception:
             pass
@@ -3762,7 +3746,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     config = GridRouteConfig(**config_kwargs)
     config.quick = int(quick or 0)
     try:
-        config.via_hole_clearance = _graded_via_hole_clearance(pcb_data, input_file)
+        from obstacle_map import graded_via_hole_clearance
+        config.via_hole_clearance = graded_via_hole_clearance(pcb_data, input_file)
     except Exception:                                          # noqa: BLE001
         pass
     # The in-loop stub-debris trim must treat input copper as read-only in

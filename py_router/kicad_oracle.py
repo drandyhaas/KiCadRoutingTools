@@ -2196,12 +2196,13 @@ def oracle_reconnect(board_file: str, net_names, config,
     # still wins via max). In-band pads stay reachable through the #338 spoke
     # exemption in obstacle_map.add_board_edge_obstacles.
     try:
-        from fix_kicad_drc_settings import effective_board_edge_clearance
+        from fix_kicad_drc_settings import (effective_board_edge_clearance,
+                                            edge_clearance_source)
         _eff_edge = effective_board_edge_clearance(
             board_file, config.board_edge_clearance)
         if _eff_edge > (config.board_edge_clearance or 0.0):
             print(f"  KiCad-oracle recheck: board edge clearance {_eff_edge}mm "
-                  f"(project min_copper_edge_clearance)")
+                  f"({edge_clearance_source(board_file)})")
             config = replace(config, board_edge_clearance=_eff_edge)
     except Exception:
         pass
