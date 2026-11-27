@@ -1095,6 +1095,9 @@ def persist_live_tool_records(board, same_net_pad_clearance=None):
             # #1379: the power widths this step was asked for, measured and disclosed.
             from protected_nets import consume_power_widths, persist_power_widths
             persist_power_widths(_pro, consume_power_widths(), board=board)
+            # #1235: the nets laid with via-centre ends.
+            from protected_nets import consume_via_centre_nets, persist_via_centre_nets
+            persist_via_centre_nets(_pro, consume_via_centre_nets(), board=board)
             # #678: the fanout tab's pour-served balls, same step boundary.
             persist_pour_served_pads(_pro, consume_pour_served_pads(),
                                      board=board)

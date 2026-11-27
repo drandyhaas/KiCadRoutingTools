@@ -216,6 +216,12 @@ GUIDE_CORRIDOR_SPACING = 0.0  # mm; 0 = waypoints only at drawn segment endpoint
 # for new copper on its side (mask_artwork.py).
 MASK_KEEPOUTS = True
 
+# #1235: a track that ends on, or runs through, a same-net via meets it at
+# the via's centre (GridRouteConfig.via_centre_ends; route.py
+# --via-centre-ends, the Route tab's "Tracks meet vias at the centre").
+# Off until a corpus A/B shows the routed result no worse.
+VIA_CENTRE_ENDS = False
+
 # Keepout zone - keep routed tracks out of a user-drawn polygon (issue #27)
 KEEPOUT_ENABLED = False
 KEEPOUT_LAYER = "User.2"  # User layer the keepout polygon is drawn on

@@ -300,6 +300,17 @@ class GridRouteConfig:
     # side where that fits (#1318), narrow only where it does not; beyond it
     # the track returns to the power width wherever the wide clearance fits.
     power_tap_neckdown: bool = True
+    # #1235: a track that ends on, or runs through, a same-net via meets it at
+    # the via's CENTRE, made where each such end is made rather than by a pass
+    # after the route: a tap sample inside a via's copper welds to the centre,
+    # a layer change is laid on the centre of the barrel that carries it, a
+    # path through a via's disc passes its centre, and a grazing via nudged
+    # off its grid cell takes the run's tracks ending at its centre along.
+    # Each move is made only where the legs into the centre clear foreign
+    # copper. Opt-in (route.py --via-centre-ends, the Route tab's "Tracks meet
+    # vias at the centre"): it changes copper, and a default change needs a
+    # corpus A/B.
+    via_centre_ends: bool = False  # routing_defaults.VIA_CENTRE_ENDS
     # #568 per-rung via legality: 0 = the configured via (baseline); 1 = the
     # small fab-rung via where the obstacle map's blocked_vias_small proves it
     # legal (populated only under KICAD_VIA_RUNG=2 dual stamping). Set on a

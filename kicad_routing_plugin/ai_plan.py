@@ -1821,6 +1821,11 @@ class PlanExecutor:
                                             persist_power_widths)
                 persist_power_widths(_pro, consume_power_widths(),
                                      board=_live)
+                # #1235: the plan's nets laid with via-centre ends.
+                from protected_nets import (consume_via_centre_nets,
+                                            persist_via_centre_nets)
+                persist_via_centre_nets(_pro, consume_via_centre_nets(),
+                                        board=_live)
                 # #678: the plan's fanout steps' pour-served balls.
                 persist_pour_served_pads(_pro, consume_pour_served_pads(),
                                          board=_live)
