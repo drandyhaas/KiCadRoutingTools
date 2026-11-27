@@ -610,6 +610,52 @@ class GridRouteConfig:
             return out
         return out
 
+    def rule_width_bounds(self, net_id: int, layer: Optional[str], w: float) -> float:
+        """``w`` clamped into the track_width [min, max] a .kicad_dru rule /
+        Board Setup declares for ``net_id`` on ``layer``. The power-width
+        channel is a scalar that outranks the per-layer map, and the
+        width-preserving re-routes (reconciliation, plane-repair reconnect,
+        rip victims) feed a net's dominant routed width through it: a net
+        whose rule is 0.18 mm outside and 0.102 mm inside came back at 0.102
+        on B.Cu. A rule is a DRC constraint, so no scalar may leave it. The
+        minimum is skipped under --escalation fab (as rule_floors does); the
+        maximum always binds. No rules: ``w`` unchanged."""
+        rules = self.rules
+        if rules is None or not (getattr(rules, 'rules', None)
+                                 or getattr(rules, 'board_min', None)):
+            return w
+        from fab_tiers import get_escalation_policy
+        policy = get_escalation_policy()[0]
+        cache = self.__dict__.get('_rule_width_bounds_cache')
+        # The bounds depend on the rules object and the escalation policy, both
+        # of which a caller may replace on a live config (install_design_rules,
+        # set_escalation_policy): a cache filled under other rules or another
+        # policy is dropped, not consulted.
+        if cache is None or cache.get('_rules') is not rules or cache.get('_policy') != policy:
+            cache = {'_rules': rules, '_policy': policy}
+            self.__dict__['_rule_width_bounds_cache'] = cache
+        key = (net_id, layer)
+        if key not in cache:
+            lo = hi = None
+            try:
+                c = rules.resolve_for_copper(
+                    'track_width', rules.item_for_net(net_id, 'track', layer),
+                    None, layer)
+                # KiCad's own minimum, not the fab tier's floor (as _neck_rule_min).
+                lo = c.kicad_min if c.fab_bound else c.min
+                hi = c.max
+                if policy == 'fab':
+                    lo = None
+            except Exception:                                  # noqa: BLE001
+                pass
+            cache[key] = (lo, hi)
+        lo, hi = cache[key]
+        if lo is not None and w < lo - 1e-9:
+            w = float(lo)
+        if hi is not None and w > hi + 1e-9:      # the maximum binds last
+            w = float(hi)
+        return w
+
     def track_floor(self, net_id: int, layer: Optional[str], fab_value: float) -> float:
         """The narrowest track a descent may deliver on ``net_id``: the fab
         floor raised to the net's own rule / board minimum (see rule_floors)."""
@@ -1171,7 +1217,9 @@ class GridRouteConfig:
         """
         if net_id in self.power_net_widths:
             # Ensure power net width is at least the base track width
-            return max(self.power_net_widths[net_id], self.track_width)
+            return self.rule_width_bounds(
+                net_id, layer,
+                max(self.power_net_widths[net_id], self.track_width))
         if self.net_layer_widths and net_id in self.net_layer_widths:
             # #521: per-net per-layer widths reapplied from a stored impedance
             # declaration (.kicad_pro net_impedance) -- a redo of an
