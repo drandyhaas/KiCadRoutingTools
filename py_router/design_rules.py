@@ -4258,8 +4258,6 @@ def guard_unmodelled_rules(rules: 'DesignRules') -> List[str]:
               f"does not model ({len(risky)} can add DRC errors):")
         for line in lines:
             print(f"    {line}")
-    else:
-        print("  RULE GUARD: the router models every rule of this board")
     if risky and os.environ.get('KICAD_RULES_STRICT', '') not in ('', '0'):
         raise SystemExit(f"RULE GUARD (KICAD_RULES_STRICT): {len(risky)} unmodelled "
                          f"rule(s); first: {risky[0]}")

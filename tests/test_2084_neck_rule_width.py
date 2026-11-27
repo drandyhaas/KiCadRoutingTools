@@ -21,6 +21,12 @@ the crossing fails honestly instead of shipping copper DRC rejects.
 A second net under a rule with a lower minimum (0.1016) and a 0.18 opt
 still necks through the wall, at no less than its minimum: the neck-down
 itself is not switched off.
+
+A third net is a 0.18 mm POWER net on a short edge (the step-down ladder)
+whose rule minimum binds on F.Cu only. The ladder's bottom rung is the
+lowest per-layer floor, so it still necks through the wall on B.Cu while
+F.Cu holds 0.18; a ladder floored at the first layer's minimum had no rung
+below 0.18 at all, and the edge failed.
 """
 import os
 import re
@@ -38,6 +44,8 @@ DRU = """(version 1)
     (constraint track_width (min 0.18mm) (opt 0.18mm) (max 0.18mm)))
 (rule "soft_outer" (layer outer) (condition "A.NetName == 'SOFT*'")
     (constraint track_width (min 0.1016mm) (opt 0.18mm) (max 0.18mm)))
+(rule "split_front" (layer "F.Cu") (condition "A.NetName == 'SPLIT*'")
+    (constraint track_width (min 0.18mm)))
 """
 PITCH = 1.94   # 1.6 mm holes: 0.34 mm gaps; 0.1016 + 2 x 0.1 fits, 0.18 + 2 x 0.1 does not
 
@@ -48,6 +56,22 @@ def build(td, net):
         b.pad(f'H{k}', 10, round(0.15 + PITCH * k, 4), 'GND', sx=1.6, sy=1.6, tht=True)
     b.pad('A1', 2, 5.0, net, sx=0.6, sy=0.6)
     b.pad('A2', 18, 5.0, net, sx=0.6, sy=0.6)
+    path = os.path.join(td, f'{net}.kicad_pcb')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(b.text())
+    with open(path[:-len('.kicad_pcb')] + '.kicad_dru', 'w', encoding='utf-8') as f:
+        f.write(DRU)
+    return path
+
+
+def build_short(td, net):
+    """A 12 x 10 board: THT pads 8 mm apart (a short edge) with the wall
+    between them."""
+    b = RoutingBoard(w=12, h=10)
+    for k in range(6):
+        b.pad(f'H{k}', 6, round(0.15 + PITCH * k, 4), 'GND', sx=1.6, sy=1.6, tht=True)
+    b.pad('A1', 2, 5.0, net, sx=0.8, sy=0.8, tht=True)
+    b.pad('A2', 10, 5.0, net, sx=0.8, sy=0.8, tht=True)
     path = os.path.join(td, f'{net}.kicad_pcb')
     with open(path, 'w', encoding='utf-8') as f:
         f.write(b.text())
@@ -69,14 +93,15 @@ def segments(path, net):
     return out
 
 
-def route(td, net):
-    board = build(td, net)
+def route(td, net, short=False):
+    board = (build_short if short else build)(td, net)
     out = os.path.join(td, f'{net}.out.kicad_pcb')
+    extra = ['--power-nets', net, '--power-nets-widths', '0.18'] if short else []
     r = subprocess.run([sys.executable, '-X', 'utf8',
                         os.path.join(ROOT, 'py_router', 'route.py'), board, out,
                         '--nets', net, '--track-width', '0.1016', '--clearance', '0.1',
                         '--grid-step', '0.02', '--layers', 'F.Cu', 'B.Cu',
-                        '--escalation', 'board'],
+                        '--escalation', 'board'] + extra,
                        capture_output=True, text=True, encoding='utf-8',
                        errors='replace', cwd=ROOT)
     if not os.path.exists(out):
@@ -109,11 +134,24 @@ def main():
                 fails.append(f"SOFT: segments below the rule's 0.1016 min: {low}")
             if soft and not any(w < 0.18 - 1e-6 for _, w in soft):
                 fails.append("SOFT crossed the wall without necking: the wall does not bite")
+        split, _ = route(td, 'SPLIT', short=True)
+        if split is None:
+            fails.append("route.py produced no board for SPLIT")
+        elif not split:
+            fails.append("SPLIT did not route: the short-edge ladder must neck "
+                         "on B.Cu, where no rule minimum binds")
+        else:
+            front = sorted({w for l, w in split if l == 'F.Cu' and w < 0.18 - 1e-6})
+            if front:
+                fails.append(f"SPLIT: F.Cu segments below the rule's 0.18 min: {front}")
+            if not any(l == 'B.Cu' and w < 0.18 - 1e-6 for l, w in split):
+                fails.append("SPLIT crossed without necking on B.Cu: the wall does not bite")
     if fails:
         print("FAIL:\n  " + "\n  ".join(fails))
         return 1
     print(f"PASS: SIG shipped {len(segs)} segments, none below 0.18; "
-          f"SOFT necked through the wall at >= 0.1016 ({len(soft)} segments)")
+          f"SOFT necked through the wall at >= 0.1016 ({len(soft)} segments); "
+          f"SPLIT necked on B.Cu only ({len(split)} segments)")
     return 0
 
 

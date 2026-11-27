@@ -4760,7 +4760,12 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
         return result + (False, None)
     span_mm = _edge_span_mm(sources, targets, config.grid_step)
     neck_floor = layer_w if power_wide else config.track_width
-    neck_floor = _floored_neck_width(config, net_id, config.layers[0], neck_floor)
+    # The ladder's bottom rung is the LOWEST per-layer floor: each rung is
+    # drawn and priced at its own layer's floor (_neck_margins, the
+    # _apply_neckdown_widths pass), so a layer whose rule minimum sits under
+    # another's still necks all the way down.
+    neck_floor = min(_floored_neck_width(config, net_id, l, neck_floor)
+                     for l in config.layers)
 
     def _pad_entry_neck(prior):
         # #1452: --escalation off refused (or could not use) the ladder.
