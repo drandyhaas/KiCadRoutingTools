@@ -25,7 +25,17 @@ vias, several failed nets asked for at two copper epochs):
      and every carried base checked against a fresh build, without a raise;
   4. a board with scoped .kicad_dru clearance rules is never derived;
   5. an escalation walking every net through a full ladder of geometries
-     builds one base per geometry, not one per net and rung.
+     builds one base per geometry, not one per net and rung;
+  6. a pad, zone or config input changed before a new epoch rebuilds the
+     base instead of carrying it over;
+  7. so do in-place pad edits (a net swap across clearance classes, a pad
+     moved through global_x), which keep the pad lists' identity and length;
+  8. an input compared by identity is held, so a new one at a freed address
+     is not taken for the old one;
+  9. with KICAD_NET_MAP_VERIFY=1, copper edited without bump_copper_epoch
+     raises, naming the contract;
+ 10. a power net's rungs (its own width override popped) are bases of
+     their own that do not evict the rungs every other net shares.
 
     python3 tests/test_2078_incremental_rescue_maps.py
 """
@@ -143,8 +153,10 @@ finally:
 # foreign copper differently from a build for [net].
 _cfg = GridRouteConfig(layers=list(LAYERS))
 _cfg.scoped_clearance = object()
+_eligible = getattr(obstacle_map, 'incremental_net_eligible', None)
 ok('4: scoped clearance rules make the delta ineligible',
-   not obstacle_map.incremental_net_eligible(board(), _cfg))
+   _eligible is not None and not _eligible(board(), _cfg),
+   '' if _eligible else 'obstacle_map has no incremental_net_eligible')
 
 # 5. Terminal escalation walks each net through every rung of its ladder in
 # turn; the base cache must hold the whole ladder or each net evicts the
@@ -203,6 +215,130 @@ def _pad_added(pcb, cfg):
 _changed_inputs('BGA keep-out set', _bga)
 _changed_inputs('pad moved to another net', _pad_moved)
 _changed_inputs('pad added', _pad_added)
+
+
+# 7. In-place edits keep a pad list's identity and length, so only the pads'
+# content can tell the board changed. Net 5 carries a wider class clearance;
+# requests run at net 4's floor.
+def _swap_across_classes(pcb, cfg):
+    from pcb_modification import swap_pad_nets_in_pcb_data
+    swap_pad_nets_in_pcb_data(pcb, pcb.pads_by_net[5][0], pcb.pads_by_net[4][2])
+
+
+def _pad_moved_in_place(pcb, cfg):
+    pcb.pads_by_net[5][0].global_x += 0.5
+
+
+def _in_place(label, change):
+    pcb = board()
+    cfg = GridRouteConfig(layers=list(LAYERS))
+    ncl = {5: 0.4}
+    name = f'7 {label}: the next epoch rebuilds, equal to a fresh build'
+    env_knobs.NET_MAP_VERIFY = True
+    try:
+        net_rescue._pristine_rescue_map(pcb, pcb, cfg, 2, ncl, ('full',))
+        change(pcb, cfg)
+        pcb.segments.append(make_seg(3.0, 2.0, 3.0, 12.0, net_id=2))
+        bump_copper_epoch(pcb)
+        got = net_rescue._pristine_rescue_map(pcb, pcb, cfg, 6, ncl, ('full',))
+        fresh = obstacle_map.build_base_obstacle_map(pcb, cfg, [6], net_clearances=ncl)
+        ok(name, digest(got) is not None and digest(got) == digest(fresh))
+    except AssertionError as exc:
+        ok(name, False, str(exc))
+    finally:
+        env_knobs.NET_MAP_VERIFY = False
+
+
+_in_place('pad nets swapped across clearance classes', _swap_across_classes)
+_in_place('pad moved in place', _pad_moved_in_place)
+
+
+# 8. An input compared by identity must be held: once freed, a new object can
+# take its address (#977). Free the board outline, allocate replacements with
+# other bounds until one lands at the old address (or a fixed number of tries,
+# when the cache holds the old one and none can), then route and bump.
+def _id_reuse():
+    pcb = board()
+    cfg = GridRouteConfig(layers=list(LAYERS))
+    name = '8: a new board_info at a freed address rebuilds, equal to a fresh build'
+    env_knobs.NET_MAP_VERIFY = True
+    try:
+        net_rescue._pristine_rescue_map(pcb, pcb, cfg, 2, {}, ('full',))
+        # the arguments first: only the instance may take the freed block
+        kw = dict(layers={}, board_bounds=(0, 0, 1.5 * N + 3, 18),
+                  copper_layers=list(LAYERS))
+        made, reused = [], False
+        old_id = id(pcb.board_info)
+        pcb.board_info = None
+        for _ in range(2000):
+            bi = BoardInfo(**kw)
+            made.append(bi)
+            if id(bi) == old_id:
+                reused = True
+                break
+        pcb.board_info = made[-1]
+        del made
+        pcb.segments.append(make_seg(3.0, 2.0, 3.0, 12.0, net_id=2))
+        bump_copper_epoch(pcb)
+        got = net_rescue._pristine_rescue_map(pcb, pcb, cfg, 4, {}, ('full',))
+        fresh = obstacle_map.build_base_obstacle_map(pcb, cfg, [4], net_clearances={})
+        ok(name, digest(got) is not None and digest(got) == digest(fresh),
+           f'address reused: {reused}')
+    except AssertionError as exc:
+        ok(name, False, str(exc))
+    finally:
+        env_knobs.NET_MAP_VERIFY = False
+
+
+_id_reuse()
+
+
+# 9. Tracks edited in place without bump_copper_epoch: the shared base is
+# served as is, so KICAD_NET_MAP_VERIFY=1 must name the broken contract.
+def _no_bump():
+    pcb = board()
+    cfg = GridRouteConfig(layers=list(LAYERS))
+    env_knobs.NET_MAP_VERIFY = True
+    msg = ''
+    try:
+        net_rescue._pristine_rescue_map(pcb, pcb, cfg, 2, {}, ('full',))
+        pcb.segments[0].end_y = 4.0
+        net_rescue._pristine_rescue_map(pcb, pcb, cfg, 4, {}, ('full',))
+    except AssertionError as exc:
+        msg = str(exc)
+    finally:
+        env_knobs.NET_MAP_VERIFY = False
+    ok('9: verify mode names copper edited without bump_copper_epoch',
+       'bump_copper_epoch' in msg, msg)
+
+
+_no_bump()
+
+
+# 10. The escalation pops a power or impedance net's own width override from
+# its rungs (`_escalation_ladder`), so that net's rungs differ in config from
+# every other net's. Its bases must not evict the rungs the others share.
+def _power_net_churn():
+    pcb = board()
+    base = GridRouteConfig(layers=list(LAYERS), power_net_widths={3: 0.5})
+    widths = (0.2, 0.18, 0.16, 0.14)
+    real, counted, calls = full_build_counter()
+    obstacle_map.build_base_obstacle_map = counted
+    try:
+        for n in range(1, 6):
+            pw = dict(base.power_net_widths)
+            pw.pop(n, None)
+            for w in widths:
+                net_rescue._pristine_rescue_map(
+                    pcb, pcb, _replace(base, track_width=w, power_net_widths=pw),
+                    n, {}, ('full',))
+    finally:
+        obstacle_map.build_base_obstacle_map = real
+    ok('10: the own rungs of a power net leave the shared rungs cached',
+       len(calls) == 2 * len(widths), f'{len(calls)} builds, want {2 * len(widths)}')
+
+
+_power_net_churn()
 
 print(f'\n{len(fails)} failure(s)' if fails else '\nall passed')
 sys.exit(1 if fails else 0)
