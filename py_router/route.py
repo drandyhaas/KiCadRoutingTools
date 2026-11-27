@@ -3009,6 +3009,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # phase-1/phase-3 routes inside the 0.5mm project edge band).
         _reconcile_kwargs['board_edge_clearance'] = board_edge_clearance
 
+    from setup_clock import SetupClock as _SetupClock
+    _clk = _SetupClock(_RUN_T0)
     # Track memory if debug_memory enabled
     mem_start = get_process_memory_mb() if debug_memory else 0.0
     if debug_memory:
@@ -3023,6 +3025,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                    keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
+    _clk.mark("load board")
     # Mask artwork keeps new copper out unless the run opts out. An in-memory
     # board handed to a nested sub-run keeps what its parent run chose.
     if not _pcb_in_memory or pcb_data.board_info.mask_keepouts is None:
@@ -4712,9 +4715,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # relocatable_plane_ids hold every zone net for tap surgery. A sub-run
     # inherits the outer run's list (pour_barriers) instead of recomputing it.
     from pour_guard import install_pour_barriers
+    _clk.mark("rules, nets and layer setup")
     _pour_guard_report = install_pour_barriers(
         config, pcb_data, all_net_ids_to_route + existing_rippable, net_names,
         given=pour_barriers)
+    _clk.mark("pour guard (KiCad zone refill + island scan)")
     _reconcile_kwargs['pour_barriers'] = list(config.pour_barriers)
     # ...and the out-of-scope zone nets it left crossable (a routed net has a
     # pad inside their pour), whose connectivity the end of the run grades
@@ -4767,6 +4772,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
+    _clk.mark("base obstacle map")
     if debug_memory:
         mem_after_base = get_process_memory_mb()
         print(format_memory_stats("After base obstacle map", mem_after_base, mem_after_base - mem_start))
@@ -4821,6 +4827,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     cache_time = time.time() - cache_start
     print(f"Net obstacle cache built in {cache_time:.2f}s ({len(net_obstacles_cache)} nets)")
+    _clk.mark("net obstacle cache")
     if debug_memory:
         mem_after_cache = get_process_memory_mb()
         cache_size = estimate_net_obstacles_cache_mb(net_obstacles_cache)
@@ -4991,7 +4998,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # mm-equiv (KICAD_PLANE_FRAGILITY_COST=0 reverts); inert on boards
     # with no zones.
     from plane_fragility import register_plane_fragility
+    _clk.mark("working map, routing state, proximity costs")
     register_plane_fragility(pcb_data, config, track_proximity_cache)
+    _clk.mark("plane fragility field")
     if _pcb_in_memory:
         # The field was rasterized from the FILE's fill (or the live board
         # as the GUI filled it); this run's in-memory copper is newer. Carve
@@ -5077,6 +5086,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Counters (kept as locals, not aliased from state)
     route_index = 0
 
+    _clk.mark("congestion fields, rippable-net registration")
+    _clk.total()
     # Route single-ended nets
     se_successful, se_failed, se_time, se_iterations, route_index, user_quit = route_single_ended_nets(
         state, single_ended_nets,
