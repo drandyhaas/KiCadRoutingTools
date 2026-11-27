@@ -276,13 +276,15 @@ rail cannot keep into a narrow pin: a whole edge that short, the last stretch
 into the pin of a longer edge whose rest keeps the net's width (#1452), or one
 via-to-pad tap. A longer neck fails the edge, and the failure names the
 allowance and the edge's span rather than advising a smaller track. Under
-`off` the project's DRC rules also ship as declared: the DRC-settings
-writeback (#160), which lowers each floor to the smallest object on the
-board, is off (as `--no-fix-drc-settings`), and so are its in-run sync and
-the GUI's live floor update. An object below the declared rules -- an input
-pad drill under the hole floor, say -- is listed at the end of the run and
-KiCad's DRC reports it, instead of the rule being lowered until the board
-grades clean. A power net's under-width copper is recorded like any other
+`off` the DRC-settings writeback (#160) records what the run asked for (an
+explicit `--clearance`, `--clearance-ceiling`, `--track-width` or via size)
+and the copper it added, but never lowers a declared rule to an object the
+input already held below it: an input pad drill under the hole floor, say,
+is listed at the end of the run and KiCad's DRC reports it, instead of the
+rule being lowered until the board grades clean. The router also routes to
+the copper-to-edge and via-hole clearances KiCad grades the input at (the
+declared rule, else KiCad's factory 0.5 mm / 0.25 mm), as it does whenever
+`--no-fix-drc-settings` leaves the project unwritten. A power net's under-width copper is recorded like any other
 narrowing (below), so `--strict-sizes` still sees it.
 
 **Net-filtered keep-outs.** A KiCad rule area has no net dimension, so a

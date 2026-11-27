@@ -80,11 +80,11 @@ def stage(d):
     return pcb
 
 
-def route(inp, out, extra, escalation='off'):
+def route(inp, out, extra):
     env = dict(os.environ, KICAD_PLANE_FINALIZE='0')
     env.pop('KICAD_INRUN_FLOOR_SYNC', None)       # the default, as reported
     r = run_check([sys.executable, '-X', 'utf8', tool('route.py'), inp, out,
-                   '--nets', 'CLK', '--escalation', escalation] + list(extra),
+                   '--nets', 'CLK', '--escalation', 'off'] + list(extra),
                   accept=True, env=env)
     return (r.stdout or '') + (r.stderr or '')
 
@@ -126,9 +126,7 @@ def t_writeback_on(tmp):
     os.makedirs(d)
     inp = stage(d)
     out = os.path.join(d, 'out.kicad_pcb')
-    # --escalation off ships the project's rules (no writeback at all), so
-    # the writeback-on control runs under fab
-    log = route(inp, out, ['--clearance', '0.15'], escalation='fab')
+    log = route(inp, out, ['--clearance', '0.15'])
     sync = [l.strip() for l in log.splitlines() if SYNC_LINE in l]
     check('control: the in-run sync fires with the writeback on', bool(sync),
           sync[0] if sync else 'no sync line')
@@ -137,29 +135,6 @@ def t_writeback_on(tmp):
     check('control: the shipped hole floor is the 0.25 held (#1493)',
           hole_clearance(read_pro(out)) == 0.25,
           f'got {hole_clearance(read_pro(out))}')
-
-
-def t_escalation_off(tmp):
-    """--escalation off without --no-fix-drc-settings: the run promised the
-    project's rules, so neither the in-run sync nor the writeback lowers
-    them -- the same --clearance 0.15 the control writes back."""
-    d = os.path.join(tmp, 'off')
-    os.makedirs(d)
-    inp = stage(d)
-    out = os.path.join(d, 'out.kicad_pcb')
-    log = route(inp, out, ['--clearance', '0.15'])
-    check('off: the net routed', routed_segments(out) > 0,
-          f'{routed_segments(out)} segment(s)')
-    check('off: no in-run floor sync', SYNC_LINE not in log,
-          next((l.strip() for l in log.splitlines() if SYNC_LINE in l), ''))
-    check('off: the console says the rules ship as declared',
-          'ship as declared' in log)
-    got = read_pro(out)
-    rules = lambda p: p['board']['design_settings']['rules']   # noqa: E731
-    check('off: the output rules are the input rules',
-          rules(got) == rules(read_pro(inp)))
-    check('off: the classes are the input classes',
-          got.get('net_settings') == read_pro(inp).get('net_settings'))
 
 
 def _guarded(tree, call_name, flag):
@@ -210,7 +185,6 @@ def main():
     try:
         t_opt_out(tmp)
         t_writeback_on(tmp)
-        t_escalation_off(tmp)
         t_static()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

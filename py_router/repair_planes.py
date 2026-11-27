@@ -4418,8 +4418,9 @@ Examples:
             print(f"  (skipped DRC-settings fix: {e})")
     elif (not args.dry_run and args.output_file
             and os.path.isfile(args.output_file)) and getattr(args, 'escalation', None) == 'off':
-        # --escalation off: the project shipped as declared; name what on the
-        # board sits below it (input copper -- the router's never does).
+        # --escalation off with the writeback off: name what on the board
+        # sits below its declared rules (input copper -- the router's never
+        # does; with the writeback on, fix_project_for_output names them).
         try:
             from fix_kicad_drc_settings import report_below_project_rules
             report_below_project_rules(args.output_file)

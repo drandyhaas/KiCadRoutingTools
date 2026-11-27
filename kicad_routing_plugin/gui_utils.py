@@ -1282,21 +1282,12 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
     deliberately does not pass -- which would have added the generic
     "floors relaxed" line to every fanout run as a side effect of a clamp fix.
 
-    A no-op for the floors under ``--escalation off`` (the run promised the
-    board's rules; fix_kicad_drc_settings._rules_are_promised): the records
-    are still persisted.
+    Under ``--escalation off`` (fix_kicad_drc_settings._rules_are_promised)
+    the floors follow the step's own values only, never the live board's
+    smallest objects, which hold the input's (the CLI's ``RunMinima``).
 
     Best-effort: never raises."""
     persist_live_tool_records(board, same_net_pad_clearance)
-    try:
-        from fix_kicad_drc_settings import _rules_are_promised
-        if _rules_are_promised():
-            if log:
-                log("  Escalation off: the board's DRC rules are left as "
-                    "declared (no floor lowered)")
-            return []
-    except Exception:                                        # noqa: BLE001
-        pass
     _clamped = []
     try:
         import pcbnew
@@ -1380,6 +1371,15 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                     if _d:
                         min_hole = _d if min_hole is None else min(min_hole, _d)
         except Exception:
+            pass
+
+        try:
+            from fix_kicad_drc_settings import _rules_are_promised
+            if _rules_are_promised():
+                # --escalation off: the live board's smallest objects include
+                # the input's own, which must not lower a declared rule
+                min_w = min_via = min_drill = min_ann = min_hole = None
+        except Exception:                                    # noqa: BLE001
             pass
 
         from fix_kicad_drc_settings import (

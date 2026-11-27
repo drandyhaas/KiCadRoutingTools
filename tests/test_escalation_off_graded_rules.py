@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """--escalation off routes to the rules KiCad grades the shipped board at.
 
-Under --escalation off the run writes no project, so KiCad grades the shipped
-board at the rules the project declares, and at KiCad's factory value for a
-rule the project leaves out (or when there is no project). The router must
-route to those rules:
+Under --escalation off the run promised the INPUT board's rules: the ones the
+project declares, and KiCad's factory value for a rule the project leaves out
+(or when there is no project). The same holds when --no-fix-drc-settings
+writes no project. The router must route to those rules
+(fab_tiers.routes_to_graded_rules):
 
 1. copper-to-edge: effective_board_edge_clearance takes the larger of the
    run's value and the graded rule (the project's, else the factory 0.5 mm).
@@ -12,9 +13,10 @@ route to those rules:
    the fab floor (0.2 mm) does so under fab, and goes round under off.
 2. via hole to pad copper: config.via_hole_clearance keeps a via's DRILL that
    floor off a pad, even where the pad's clearance override is smaller.
-3. obstacle_map.graded_via_hole_clearance resolves that floor when no
-   project is written: the declared rule, else the factory 0.25 mm. Under
-   fab it is unset: the writeback records the floor the run routed to.
+3. obstacle_map.graded_via_hole_clearance resolves that floor under off, or
+   when no project is written: the declared rule, else the factory 0.25 mm.
+   Under fab with the writeback on it is unset: the writeback records the
+   floor the run routed to.
 4. close_soft_joints refuses a bridge inside another net's FILLED footprint
    copper (an SOT tab drawn as a polygon), and keeps a bridge of the net the
    tab's own pad gives it, as the obstacle map does.
@@ -28,6 +30,8 @@ route to those rules:
    factory value, not the project, when the project declares no rule.
 
 Controls: under fab (the writeback on) items 1 and 3 do not change.
+Under off the writeback still runs; it lowers no declared rule the router
+routed to (test_escalation_off_keeps_project_rules.py has its contract).
 
     python3 tests/test_escalation_off_graded_rules.py
 """
@@ -70,12 +74,11 @@ def _project(path, rules):
                   f, indent=2)
 
 
-def _policy(policy):
-    """Install `policy` as set_policy_from_args does: off implies no
-    writeback."""
+def _policy(policy, writeback=True):
+    """Install `policy` as set_policy_from_args does (`writeback` False is
+    --no-fix-drc-settings)."""
     import fab_tiers
-    fab_tiers.set_escalation_policy(
-        policy, writeback=fab_tiers.project_writeback_allowed(policy))
+    fab_tiers.set_escalation_policy(policy, writeback=writeback)
 
 
 # ---------------------------------------------------------------- 1. edge
@@ -162,8 +165,16 @@ def t_edge_route(tmp):
         gaps[esc], n = _min_edge_gap(out, 'CLK')
         check(f"{esc}: CLK routed", n > 0, f'{n} segment(s)')
         if esc == 'off':
-            check("off: no project written",
-                  not os.path.isfile(os.path.splitext(out)[0] + '.kicad_pro'))
+            pro = os.path.splitext(out)[0] + '.kicad_pro'
+            edge = None
+            if os.path.isfile(pro):
+                with open(pro, encoding='utf-8') as f:
+                    edge = (json.load(f)['board']['design_settings']['rules']
+                            .get('min_copper_edge_clearance'))
+            check("off: the written project grades the copper it holds "
+                  "(edge rule at most the routed gap)",
+                  edge is not None and gaps['off'] is not None
+                  and edge <= gaps['off'] + 1e-6, f'rule {edge}, gap {gaps["off"]}')
     if None in gaps.values() or len(gaps) < 2:
         return
     check("control: fab routes inside the factory 0.5 mm band (the gap is "
@@ -239,6 +250,11 @@ def t_graded_via_hole(tmp):
     got = graded_via_hole_clearance(pd, decl)
     check("control: fab, project declares 0.3: unset (the default is unchanged)",
           got == 0.0, f'{got}')
+    _policy('fab', writeback=False)
+    got = graded_via_hole_clearance(pd, decl)
+    check("fab, --no-fix-drc-settings: the declared 0.3 (no project written)",
+          abs(got - 0.3) < 1e-9, f'{got}')
+    _policy('fab')
 
 
 # -------------------------------------------------- 4. filled footprint copper
@@ -460,6 +476,11 @@ def t_edge_source(tmp):
     got = edge_clearance_source(bare)
     check("control: fab: the project (the writeback records the rule)",
           got.startswith('project'), got)
+    _policy('fab', writeback=False)
+    got = edge_clearance_source(bare)
+    check("fab, --no-fix-drc-settings, no project: KiCad's factory value",
+          'factory' in got, got)
+    _policy('fab')
 
 
 def main():
