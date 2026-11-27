@@ -285,6 +285,13 @@ def _route_power_nets_count_mismatch(ns, cwd):
                 f"must have the same length")
 
 
+def _route_via_cost_nets_count_mismatch(ns, cwd):
+    # route.py: one cost per --via-cost-nets pattern, the engine's own check
+    from net_keepouts import via_cost_nets_error
+    return via_cost_nets_error(getattr(ns, 'via_cost_nets', None),
+                               getattr(ns, 'via_cost_nets_costs', None))
+
+
 def _repair_count_mismatch(ns, cwd):
     if ns.nets and ns.plane_layers and len(ns.nets) != len(ns.plane_layers):
         return "when both --nets and --plane-layers are given, counts must match"
@@ -320,7 +327,8 @@ def _cap_intent_unreadable(ns, cwd):
 POST_PARSE = {
     'route.py': (_fab_overrides_missing, _output_twice, _route_group_empty,
                  _keep_away, _route_force_reroute_unscoped, _route_group_sources,
-                 _route_power_nets_count_mismatch, _net_clearances_unreadable),
+                 _route_power_nets_count_mismatch,
+                 _route_via_cost_nets_count_mismatch, _net_clearances_unreadable),
     'route_diff.py': (_keep_away, _fab_overrides_missing, _output_twice,
                       _diff_force_reroute_unscoped, _net_clearances_unreadable),
     'route_planes.py': (_fab_overrides_missing, _output_twice,
@@ -363,6 +371,7 @@ REFUSAL_SITES = {
         '--force-reroute requires an explicit net':
             ('argv', '_route_force_reroute_unscoped'),
         '--power-nets (': ('argv', '_route_power_nets_count_mismatch'),
+        'if _vce': ('argv', '_route_via_cost_nets_count_mismatch'),
         '--component matched no footprint on this':
             ('board', "the board's footprint references"),
         # parse_sources is the argument half; block_refs, in the same try,

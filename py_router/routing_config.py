@@ -528,6 +528,13 @@ class GridRouteConfig:
     # search prices each such net at its own via through the obstacle map's
     # via-legality RUNGS (obstacle_cache.via_rungs) and emits vias at it.
     net_via_sizes: Dict[int, Tuple[float, float]] = field(default_factory=dict)
+    # Per-net via penalty (--via-cost-nets / --via-cost-nets-costs), net id ->
+    # via_cost in the same units: a net that should take no via where a
+    # longer path on one layer exists (a crystal) is priced up alone, the run's
+    # via_cost stays for every other net. Applied by net_keepouts.config_for_nets,
+    # the per-net config every route of a net is searched with (2-pad, the
+    # multipoint main and taps, rescue, diff pairs). Empty = inert.
+    net_via_costs: Dict[int, int] = field(default_factory=dict)
     # #1260: the copper pours this run may not CUT -- fill islands of zone
     # nets outside the run's scope that no routed net has a terminal inside
     # (pour_guard.install_pour_barriers), each {'net', 'layer', 'polygons',

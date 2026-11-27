@@ -139,6 +139,9 @@ LIST_FLAGS = {
     # #1869: route_diff's intra-pair lane ('auto' or P_NET=REF.PAD:REF.PAD ...)
     '--diff-pair-intra-lane': 'diff_pair_intra_lane',
     '--coplanar-nets': 'coplanar_nets',
+    # route.py's per-net via cost (#2049)
+    '--via-cost-nets': 'via_cost_nets',
+    '--via-cost-nets-costs': 'via_cost_nets_costs',
     # bga_fanout's future-pour declaration: collected by the converter and
     # then never copied into the step (26 kept corpus steps on 18 boards).
     '--plane-net-layers': 'plane_net_layers',
@@ -1967,6 +1970,11 @@ _POST_PARSE_WITNESSES = (
      'must have the same length'),
     ('_route_power_nets_count_mismatch', 'route.py a.kicad_pcb b.kicad_pcb '
      '--nets X --power-nets GND +3V3', None),
+    ('_route_via_cost_nets_count_mismatch', 'route.py a.kicad_pcb b.kicad_pcb '
+     '--nets X --via-cost-nets XTAL* OSC* --via-cost-nets-costs 40',
+     'must have the same length'),
+    ('_route_via_cost_nets_count_mismatch', 'route.py a.kicad_pcb b.kicad_pcb '
+     '--nets X --via-cost-nets XTAL* OSC* --via-cost-nets-costs 40 30', None),
     ('_cap_clearance_not_finite', 'place_fanout_clearance.py a.kicad_pcb '
      '--clearance nan', 'finite number'),
     ('_cap_clearance_not_finite', 'place_fanout_clearance.py a.kicad_pcb '

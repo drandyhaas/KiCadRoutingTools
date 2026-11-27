@@ -368,6 +368,9 @@ LIST_FLAGS = {
     '--via-span': 'via_span',
     '--power-nets': 'power_nets',
     '--power-nets-widths': 'power_nets_widths',
+    # route.py's per-net via cost (#2049): patterns and their costs, in order
+    '--via-cost-nets': 'via_cost_nets',
+    '--via-cost-nets-costs': 'via_cost_nets_costs',
     '--layer-costs': 'layer_costs',
     # #381 D3: route_diff's polarity-swap allowlist (nargs='+' globs). Carried
     # explicitly (not via the generic unknown-flag fallthrough) so a scoped
@@ -863,7 +866,8 @@ def parse_command(argv, cwd=None):
     # --plane-net-layers was collected above and then never copied out: the
     # LIST_FLAGS row's own comment says a converted plan used to drop it, and
     # it still did (26 kept bga_fanout steps on 18 corpus boards).
-    for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
+    for k in ('--power-nets', '--power-nets-widths', '--via-cost-nets',
+              '--via-cost-nets-costs', '--layer-costs',
               '--layers', '--via-span', '--polarity-swap-nets', '--coplanar-nets',
               '--rip-existing-nets', '--plane-net-layers', '--keep-away',
               '--diff-pair-intra-lane'):
