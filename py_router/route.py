@@ -333,6 +333,15 @@ def _scoped_rules_of(config):
     return getattr(getattr(config, 'scoped_clearance', None), 'sc', None)
 
 
+def _net_layer_draw_widths(config, pcb_data) -> dict:
+    """``{net_id: {layer: mm}}``: every net's track width on every routing
+    layer, as this step draws it (get_net_track_width: power width, per-layer
+    and impedance widths, net class, --track-width). The plane finalize
+    bounds its region joins with it under --escalation off."""
+    return {nid: {l: config.get_net_track_width(nid, l) for l in config.layers}
+            for nid in (pcb_data.nets or {}) if nid}
+
+
 def _finalize_route_knobs(call_kwargs: dict) -> dict:
     """This batch_route call's own values of _FINALIZE_ROUTE_KNOBS."""
     return {k: call_kwargs[k] for k in _FINALIZE_ROUTE_KNOBS if k in call_kwargs}
@@ -3189,10 +3198,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for nid in pcb_data.nets:
                     if nid == 0:
                         continue
-                    w_all = _dr.draw_size('track_width', nid)
-                    by_layer = {l: _dr.draw_size('track_width', nid, l) for l in _cu}
-                    by_layer = {l: w for l, w in by_layer.items() if w is not None}
-                    if by_layer and len(set(by_layer.values())) > 1:
+                    w_all, by_layer = _dr.track_draw_widths(nid, _cu)
+                    if by_layer:
                         _per_layer[nid] = by_layer
                     # An explicit --track-width is the PNS 'custom size': it
                     # wins where a layer's rule allows it and is clamped into
@@ -3200,16 +3207,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # 55-ohm class fixed at 0.18 outer / 0.102 inner drew
                     # 0.18 on inner layers, 199 track_width errors).
                     if not track_width_from_class and impedance is None and _cu:
-                        _xl = {}
-                        for l in _cu:
-                            _c = _dr.resolve_for_copper(
-                                'track_width', _dr.item_for_net(nid, 'track', l), None, l)
-                            _w = track_width
-                            if _c.min_rule is not None and _c.min is not None and _w < _c.min:
-                                _w = _c.min
-                            if _c.max is not None and _w > _c.max:
-                                _w = _c.max
-                            _xl[l] = float(_w)
+                        _xl = {l: _dr.clamp_track_width(nid, l, track_width) for l in _cu}
                         if any(abs(w - track_width) > 1e-9 for w in _xl.values()):
                             _per_layer_explicit[nid] = _xl
                     if w_all is not None and (_dflt_w is None or abs(w_all - _dflt_w) > 1e-9
@@ -8241,8 +8239,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         power_nets_widths=power_nets_widths,
                         # The step's netclass widths: without them the
                         # finalize read class nets at the board default and
-                        # the pad-entry allowance never bounded its taps.
+                        # the pad-entry allowance never bounded its taps
+                        # (#2047); under --escalation off/board the region
+                        # joins also keep each plane net at its own width /
+                        # floor (net class / .kicad_dru / impedance).
                         net_track_widths=dict(config.net_track_widths or {}),
+                        net_layer_widths=_net_layer_draw_widths(config, pcb_data),
+                        join_design_rules=getattr(config, 'rules', None),
                         netclass_width_floors=dict(
                             getattr(config, 'netclass_width_floors', None) or {}),
                         # #658: the chain's layer economics reach the
@@ -8340,8 +8343,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         power_nets_widths=power_nets_widths,
                         # The step's netclass widths: without them the
                         # finalize read class nets at the board default and
-                        # the pad-entry allowance never bounded its taps.
+                        # the pad-entry allowance never bounded its taps
+                        # (#2047); under --escalation off/board the region
+                        # joins also keep each plane net at its own width /
+                        # floor (net class / .kicad_dru / impedance).
                         net_track_widths=dict(config.net_track_widths or {}),
+                        net_layer_widths=_net_layer_draw_widths(config, pcb_data),
+                        join_design_rules=getattr(config, 'rules', None),
                         netclass_width_floors=dict(
                             getattr(config, 'netclass_width_floors', None) or {}),
                         # #658: same layer economics as the GUI leg above.
