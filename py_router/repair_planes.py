@@ -839,6 +839,11 @@ def auto_detect_zones(
     seen = set()
 
     for zone in zones:
+        # A pour with no net (KiCad writes no (net ...) for it) is not a plane
+        # to repair: the run stopped on it with "Net '' not found". The GUI
+        # leg of route.py's finalize skips it the same way.
+        if not zone.net_name:
+            continue
         # Apply filters
         if filter_nets and zone.net_name not in filter_nets:
             continue
