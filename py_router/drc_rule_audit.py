@@ -23,6 +23,10 @@ the router did not apply a rule KiCad enforces. The target is 0.
 """
 from __future__ import annotations
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing', 'combined'], 'kind': 'instrument'}
+
 import argparse
 import collections
 import json
