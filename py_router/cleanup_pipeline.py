@@ -196,6 +196,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                            keep_input_copper: bool = False,
                            progress_callback=None,
                            smooth: bool = False,
+                           chamfer_corners: bool = False,
                            merge_collinear: bool = True,
                            strict_collapse: bool = True,
                            extra_length_matched_net_ids=None,
@@ -777,6 +778,34 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _mc_n:
             print(f"{label}Merged {_mc_stats.get('joints', 0)} collinear joint(s) "
                   f"on {_mc_nets} net(s): -{_mc_n} redundant segment(s) (#811)")
+
+    # 45-degree corners: LAST copper-shape step, so the corners joint bridging
+    # and the merges above leave are seen too. The caller decides (route.py:
+    # on with --chamfer-corners, off with --no-smoothing; the plane finalize
+    # the same through its route knobs); KICAD_SMOOTH_ROUTE=0 and guide-corridor
+    # steps turn it off as they do the smoothing.
+    if chamfer_corners and _sm_env not in ('0', 'false', 'off') \
+            and not getattr(config, 'guide_corridor_enabled', False):
+        _prog("45-degree corners")
+        _ch_n, _ch_nets, _ch_strip, _ch_added, _ch_stats = smooth_octolinear_chains(
+            results, pcb_data, _sub_scope, clearance=config.clearance,
+            keep_input_copper=keep_input_copper,
+            net_clearances=_nc, board_edge_clearance=_bec,
+            config=config,
+            skip_net_ids=_smooth_skip_net_ids(pcb_data),
+            chamfer_corners=True)
+        counts['corners_chamfered'] = _ch_stats.get('corners_chamfered', 0)
+        _ch_left = _ch_stats.get('corners_left') or {}
+        counts['corners_left'] = sum(_ch_left.values())
+        strip.extend(_ch_strip)
+        if _ch_stats.get('corners_chamfered') or _ch_left:
+            print(f"{label}45-degree corners: chamfered "
+                  f"{_ch_stats.get('corners_chamfered', 0)} 90-degree corner(s) on "
+                  f"{_ch_nets} net(s)"
+                  + (f"; left {sum(_ch_left.values())}: "
+                     + ", ".join(f"{why} {n}" for why, n in sorted(
+                         _ch_left.items(), key=lambda kv: (-kv[1], kv[0])))
+                     if _ch_left else ""))
 
     # #1843: the collinear merge (and smoothing) can join a split back
     _as_n = _area_split(results, pcb_data, config, None)

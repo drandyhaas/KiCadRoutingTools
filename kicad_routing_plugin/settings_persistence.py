@@ -137,6 +137,7 @@ def get_dialog_settings(dialog):
         'mps_layer_swap': dialog.mps_layer_swap.GetValue(),
         'keep_input_copper': dialog.keep_input_copper.GetValue(),
         'smoothing': dialog.smoothing.GetValue(),
+        'chamfer_corners': dialog.chamfer_corners.GetValue(),
         'force_reroute': dialog.force_reroute.GetValue(),
         'mps_segment_intersection': dialog.mps_segment_intersection.GetValue(),
         'no_crossing_layer_check': dialog.no_crossing_layer_check.GetValue(),
@@ -540,6 +541,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.keep_input_copper.SetValue(settings['keep_input_copper'])
     if 'smoothing' in settings:
         dialog.smoothing.SetValue(settings['smoothing'])
+    if 'chamfer_corners' in settings:
+        dialog.chamfer_corners.SetValue(settings['chamfer_corners'])
     if 'force_reroute' in settings:
         dialog.force_reroute.SetValue(settings['force_reroute'])
     if 'mps_segment_intersection' in settings:

@@ -1547,7 +1547,8 @@ class PlaneCleanupDelta(NamedTuple):
 
 def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float,
                                  grid_step: float, board_edge_clearance: float,
-                                 progress_callback=None) -> "PlaneCleanupDelta":
+                                 progress_callback=None,
+                                 chamfer_corners: bool = False) -> "PlaneCleanupDelta":
     """Board-level core of the plane-copper cleanup (issues #84, #308, #319).
 
     Runs the ONE shared run_post_route_cleanup pipeline the signal fronts use --
@@ -1585,7 +1586,8 @@ def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float,
         plane_results, pcb, scope, _cfg,
         label='Plane ', phantom=False, via_nudge=False, neck=False,
         microshift_max_shift=grid_step,
-        progress_callback=progress_callback)
+        progress_callback=progress_callback,
+        chamfer_corners=chamfer_corners)
     return PlaneCleanupDelta(
         connectors=[s for r in plane_results for s in (r.get('new_segments') or [])],
         segments_to_remove=list(_outcome.input_strip_segments),
@@ -1594,7 +1596,8 @@ def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float,
 
 
 def clean_plane_copper(output_file: str, plane_net_names, clearance: float,
-                       grid_step: float, board_edge_clearance: float) -> Tuple[int, int]:
+                       grid_step: float, board_edge_clearance: float,
+                       chamfer_corners: bool = False) -> Tuple[int, int]:
     """FILE front for the plane-copper cleanup: parse the plane tool's OUTPUT
     FILE, compute the cleanup delta via compute_plane_copper_cleanup (the shared
     board-level core), and rewrite the file (stripping removed segments/vias,
@@ -1612,7 +1615,8 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float,
     with open(output_file, 'r', encoding='utf-8') as f:
         content = f.read()
     delta = compute_plane_copper_cleanup(pcb, plane_net_names, clearance, grid_step,
-                                         board_edge_clearance)
+                                         board_edge_clearance,
+                                         chamfer_corners=chamfer_corners)
     if delta.is_empty:
         return 0, 0
 
@@ -5885,6 +5889,32 @@ def _seg_cross_point(ax, ay, bx, by, cx, cy, dx, dy):
     return (ax + t * rx, ay + t * ry)
 
 
+def _right_angle_vertices(segs) -> int:
+    """Vertices where exactly two same-layer tracks of `segs` meet at 90
+    degrees (the corner pass's geometry test, nothing else)."""
+    ends = {}
+    for s in segs:
+        if getattr(s, 'graphic', False):
+            continue
+        for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            ends.setdefault((round(x, 4), round(y, 4), s.layer), []).append(s)
+    n = 0
+    for (x, y, _l), pair in ends.items():
+        if len(pair) != 2 or pair[0] is pair[1]:
+            continue
+        vs = []
+        for s in pair:
+            fx, fy = ((s.end_x, s.end_y) if (round(s.start_x, 4), round(s.start_y, 4)) == (x, y)
+                      else (s.start_x, s.start_y))
+            ln = math.hypot(fx - x, fy - y)
+            if ln < 1e-6:
+                break
+            vs.append(((fx - x) / ln, (fy - y) / ln))
+        if len(vs) == 2 and abs(vs[0][0] * vs[1][0] + vs[0][1] * vs[1][1]) <= 1e-3:
+            n += 1
+    return n
+
+
 def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                              clearance: float = 0.1,
                              keep_input_copper: bool = False,
@@ -5895,8 +5925,26 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                              dry_run: bool = False,
                              min_gain: float = 0.01,
                              max_net_segs: int = 400,
-                             max_chain_segs: int = 100):
+                             max_chain_segs: int = 100,
+                             chamfer_corners: bool = False,
+                             chamfer_leg: float = 0.5):
     """Collapse grid-A* staircase micro-jogs into octolinear shortcuts (#536).
+
+    With ``chamfer_corners`` this call smooths nothing and cuts 90-degree
+    corners instead (the cleanup pipeline's last copper step; route.py runs it
+    with --chamfer-corners): wherever exactly two same-layer
+    tracks of a routed net meet at 90 degrees with no via, each is cut back by
+    up to ``chamfer_leg`` mm (at most half its length; halved once when the
+    full cut does not clear). A corner on a pad is left (the pad copper fills
+    it), and so is one where other same-net copper touches the cut-off pieces.
+    The new leg passes the shortcut clearance test, adds no track inside a
+    keep-away band (#2006) and may not degrade the net's connectivity. Acute
+    corners are left: cutting them would leave the 45-degree grid. Under
+    keep_input_copper only this run's tracks are cut. At a width change the
+    new leg takes the narrower width, or the wider one under --escalation off
+    (so a neck never grows). A short leg ending in a plain joint may be cut
+    whole. The corners left are counted by reason in stats['corners_left'].
+    With dry_run the corner pass does nothing and counts nothing.
 
     Walks each net's simple track chains (split at junctions, same-net vias,
     pad landings, width changes, layer changes) and greedily replaces the
@@ -6228,6 +6276,257 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     removed_ids = set()
     original_to_remove = []
     added_segments = []
+
+    def touched(gone, pts, s1, s2, net_segs, net_pads, net_vias, layer, w):
+        """True when same-net copper other than the corner's own two tracks
+        touches a piece the cut removes and the new path ``pts`` does not
+        take it over: a track end or via there must lie on the new centreline,
+        a pad must still be reached (#319: the final copper step removes
+        nothing that still carries a connection)."""
+        new = list(zip(pts, pts[1:]))
+
+        def on_new(x, y):
+            return any(_pt_seg_dist(x, y, a[0], a[1], b[0], b[1]) <= COINCIDENCE_TOL
+                       for a, b in new)
+
+        def samples(a, b):
+            k = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.02))
+            return [(a[0] + (b[0] - a[0]) * t / k, a[1] + (b[1] - a[1]) * t / k)
+                    for t in range(k + 1)]
+
+        for (x1, y1), (x2, y2) in gone:
+            for s in net_segs:
+                if s is s1 or s is s2 or s.layer != layer:
+                    continue
+                r = (s.width + w) / 2.0 + COINCIDENCE_TOL
+                for ex, ey in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+                    if _pt_seg_dist(ex, ey, x1, y1, x2, y2) < r and not on_new(ex, ey):
+                        return True
+            for v in net_vias:
+                if (_pt_seg_dist(v.x, v.y, x1, y1, x2, y2) < (v.size + w) / 2.0 + COINCIDENCE_TOL
+                        and not on_new(v.x, v.y)):
+                    return True
+            reach = w / 2.0 + COINCIDENCE_TOL
+            for pad in net_pads:
+                if not (layer in pad.layers or any('*' in L for L in pad.layers)):
+                    continue
+                # a pad whose bounding circle stays out of reach of the piece
+                # cannot touch it
+                pr = math.hypot(pad.size_x, pad.size_y) / 2.0 + reach
+                if _pt_seg_dist(pad.global_x, pad.global_y, x1, y1, x2, y2) > pr:
+                    continue
+                if (any(point_to_pad_distance(x, y, pad) <= reach
+                        for x, y in samples((x1, y1), (x2, y2)))
+                        and not any(point_to_pad_distance(x, y, pad) <= reach
+                                    for a, b in new for x, y in samples(a, b))):
+                    return True
+        return False
+
+    corners_left = {}
+
+    def _try_corner(net_id, key, s1, s2, net_segs, net_pads, net_vias, via_keys,
+                    in_band, before):
+        """One vertex where exactly two same-layer tracks meet: None when it is
+        not a 90-degree corner, ('cut', new segments) when it can be cut, else
+        ('left', reason). At a width change the new leg takes the narrower
+        width; each kept piece keeps its own."""
+        def far(s):
+            return ((s.end_x, s.end_y) if vk(s.start_x, s.start_y) == key
+                    else (s.start_x, s.start_y))
+
+        P = ((s1.start_x, s1.start_y) if vk(s1.start_x, s1.start_y) == key
+             else (s1.end_x, s1.end_y))
+        A, B = far(s1), far(s2)
+        la = math.hypot(A[0] - P[0], A[1] - P[1])
+        lb = math.hypot(B[0] - P[0], B[1] - P[1])
+        if la < 1e-6 or lb < 1e-6:
+            return None
+        ua = ((A[0] - P[0]) / la, (A[1] - P[1]) / la)
+        ub = ((B[0] - P[0]) / lb, (B[1] - P[1]) / lb)
+        if abs(ua[0] * ub[0] + ua[1] * ub[1]) > 1e-3:
+            return None                           # not a 90-degree corner
+        if key in via_keys:
+            return ('left', 'via')
+        if keep_input_copper and not (id(s1) in routed_seg_result
+                                      and id(s2) in routed_seg_result):
+            return ('left', 'input copper')
+        layer = s1.layer
+        wmax = max(s1.width, s2.width)
+        # The new leg's width. At a width change the narrower one, so the leg
+        # fits where the narrow track did -- but that lengthens the narrow run
+        # by up to (sqrt(2) - 1) x the cut, which --escalation off forbids for
+        # a neck (#1452): there it takes the wider width, so the narrow run
+        # only gets shorter.
+        from fab_tiers import may_narrow
+        width_change = abs(s1.width - s2.width) > 1e-6
+        w = min(s1.width, s2.width) if (not width_change or may_narrow()) else wmax
+        if any((layer in pad.layers or any('*' in L for L in pad.layers))
+               and point_to_pad_distance(P[0], P[1], pad) <= wmax / 2.0 + COINCIDENCE_TOL
+               for pad in net_pads):
+            return ('left', 'pad')                # its copper fills the corner
+        def attempt(P1, P2, gone, widths):
+            """('cut', new segments) or ('left', reason) for the 45-degree leg
+            P1-P2 that replaces the `gone` pieces. pts: A, P1, P2, B."""
+            pts = [A, P1, P2, B]
+            if touched([q for q, _wq in gone], pts, s1, s2, net_segs, net_pads,
+                       net_vias, layer, wmax):
+                return ('left', 'touch')
+            if in_band is not None:
+                added = in_band(layer, P1[0], P1[1], P2[0], P2[1], w)
+                if added > 0.0 and added > sum(
+                        in_band(layer, q[0][0], q[0][1], q[1][0], q[1][1], wq)
+                        for q, wq in gone) + 1e-9:
+                    return ('left', 'band')
+            if not clears(P1[0], P1[1], P2[0], P2[1], layer, net_id, w):
+                return ('left', 'blocked')
+            new = [Segment(start_x=pts[q][0], start_y=pts[q][1],
+                           end_x=pts[q + 1][0], end_y=pts[q + 1][1],
+                           width=widths[q], layer=layer, net_id=net_id)
+                   for q in range(3)
+                   if math.hypot(pts[q + 1][0] - pts[q][0],
+                                 pts[q + 1][1] - pts[q][1]) > _SMOOTH_DEGENERATE_LEG]
+            trial = [s for s in net_segs if s is not s1 and s is not s2] + new
+            if before[0] is None:
+                before[0] = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
+                                                   [], pcb_data=pcb_data)
+            if worse(before[0], check_net_connectivity(net_id, trial, net_vias, net_pads,
+                                                       [], pcb_data=pcb_data)):
+                return ('left', 'connectivity')
+            return ('cut', new)
+
+        cut = min(chamfer_leg, la / 2.0, lb / 2.0)
+        why = 'short leg'
+        for c in (cut, cut / 2.0):
+            if c < max(w / 2.0, _SMOOTH_DEGENERATE_LEG):
+                break
+            P1 = (P[0] + ua[0] * c, P[1] + ua[1] * c)
+            P2 = (P[0] + ub[0] * c, P[1] + ub[1] * c)
+            verdict = attempt(P1, P2, (((P, P1), s1.width), ((P, P2), s2.width)),
+                              (s1.width, w, s2.width))
+            if verdict[0] == 'cut':
+                return verdict
+            why = verdict[1]
+        if why != 'short leg':
+            if width_change and w == wmax:
+                why = f'width change, no narrowing ({why})'
+            return ('left', why)
+        # The cut's half-length limit lets a leg be cut from both ends. A short
+        # leg whose far end is a PLAIN JOINT -- one more track of its width
+        # there, no via, no pad, no branch -- has no corner at that end to
+        # share, so the cut may take it whole: c = its length on both legs,
+        # ending exactly at that joint, when the turn there stays at 0 or 45
+        # degrees (no new corner) and the long leg keeps at least as much.
+        whole_why = None
+        for short, longs, Bs, As, us, ul, ls, ll in (
+                (s2, s1, B, A, ub, ua, lb, la), (s1, s2, A, B, ua, ub, la, lb)):
+            if ls > ll or ls < _SMOOTH_DEGENERATE_LEG or ll < 2.0 * ls:
+                continue
+            at_b = [t for t in net_segs if t is not short
+                    and (vk(t.start_x, t.start_y) == vk(*Bs) or vk(t.end_x, t.end_y) == vk(*Bs))]
+            if len(at_b) != 1 or at_b[0].layer != layer \
+                    or abs(at_b[0].width - short.width) > 1e-6 or vk(*Bs) in via_keys:
+                continue
+            if any((layer in pad.layers or any('*' in L for L in pad.layers))
+                   and point_to_pad_distance(Bs[0], Bs[1], pad) <= wmax / 2.0 + COINCIDENCE_TOL
+                   for pad in net_pads):
+                continue
+            nxt = at_b[0]
+            C = ((nxt.end_x, nxt.end_y) if vk(nxt.start_x, nxt.start_y) == vk(*Bs)
+                 else (nxt.start_x, nxt.start_y))
+            lc = math.hypot(C[0] - Bs[0], C[1] - Bs[1])
+            Q = (P[0] + ul[0] * ls, P[1] + ul[1] * ls)
+            lq = math.hypot(Bs[0] - Q[0], Bs[1] - Q[1])
+            if lc < 1e-9 or lq < 1e-9:
+                continue
+            d = ((Bs[0] - Q[0]) / lq, (Bs[1] - Q[1]) / lq)
+            e = ((C[0] - Bs[0]) / lc, (C[1] - Bs[1]) / lc)
+            if d[0] * e[0] + d[1] * e[1] < math.cos(math.radians(45.0)) - 1e-6:
+                continue                          # the turn at B would be 90 or acute
+            # the pieces in A, P1, P2, B order for `attempt`
+            if short is s2:
+                verdict = attempt(Q, Bs, (((P, Q), s1.width), ((P, Bs), s2.width)),
+                                  (s1.width, w, s2.width))
+            else:
+                verdict = attempt(Bs, Q, (((P, Bs), s1.width), ((P, Q), s2.width)),
+                                  (s1.width, w, s2.width))
+            if verdict[0] == 'cut':
+                return verdict
+            whole_why = verdict[1]
+        return ('left', 'short leg' if whole_why is None else f'short leg ({whole_why})')
+
+    def _chamfer_net_corners(net_id, net_pads, net_vias, in_band):
+        """45-degree corners on one net (see the docstring). Returns True when
+        it changed the net. Only this run's tracks under keep_input_copper."""
+        changed = False
+        # Each cut removes a 90-degree corner and makes none, so the net's own
+        # corner count bounds the rounds; anything still there after that is
+        # counted, never dropped silently.
+        budget = _right_angle_vertices(
+            [s for s in pcb_data.segments if s.net_id == net_id]) + 1
+        def commit(s1, s2, new):
+            res = None
+            for s in (s1, s2):
+                if id(s) in routed_seg_result:
+                    removed_ids.add(id(s))
+                    res = res or routed_seg_result[id(s)]
+                else:
+                    original_to_remove.append(s)
+            if res is None:
+                res = {'new_segments': [], 'new_vias': [], 'cleanup': 'chamfer_corners'}
+                results.append(res)
+            res['new_segments'] = list(res.get('new_segments') or []) + new
+            for s in new:
+                routed_seg_result[id(s)] = res
+            added_segments.extend(new)
+            pcb_data.segments = [s for s in pcb_data.segments
+                                 if s is not s1 and s is not s2] + new
+            if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+                pcb_data._foreign_seg_arr_cache = None
+            stats['corners_chamfered'] = stats.get('corners_chamfered', 0) + 1
+
+        # One scan per round cuts every corner it can; a vertex whose track a
+        # cut in this round replaced waits for the next round. A round that
+        # cuts nothing ends the net.
+        for _round in range(budget):
+            net_segs = [s for s in pcb_data.segments if s.net_id == net_id
+                        and not getattr(s, 'graphic', False)]
+            ends = defaultdict(list)
+            for s in net_segs:
+                ends[vk(s.start_x, s.start_y)].append(s)
+                ends[vk(s.end_x, s.end_y)].append(s)
+            via_keys = {vk(v.x, v.y) for v in net_vias}
+            before = [None]
+            left = defaultdict(int)
+            gone = set()
+            cut_any = False
+            for key, pair in ends.items():
+                if len(pair) != 2:
+                    continue
+                s1, s2 = pair
+                if s1 is s2 or s1.layer != s2.layer or id(s1) in gone or id(s2) in gone:
+                    continue
+                verdict = _try_corner(net_id, key, s1, s2, net_segs, net_pads,
+                                      net_vias, via_keys, in_band, before)
+                if verdict is None:
+                    continue                      # not a 90-degree corner
+                if verdict[0] == 'cut':
+                    commit(s1, s2, verdict[1])
+                    gone |= {id(s1), id(s2)}
+                    net_segs = [s for s in net_segs
+                                if s is not s1 and s is not s2] + verdict[1]
+                    # the baseline stays: a cut is only taken when it leaves
+                    # the net's connectivity as it was
+                    cut_any = changed = True
+                    continue
+                left[verdict[1]] += 1
+            if not cut_any:
+                for why, n in left.items():
+                    corners_left[why] = corners_left.get(why, 0) + n
+                return changed
+        n90 = _right_angle_vertices([s for s in pcb_data.segments if s.net_id == net_id])
+        if n90:
+            corners_left['round limit'] = corners_left.get('round limit', 0) + n90
+        return changed
     nets_changed = 0
     stats = {'nets': 0, 'nets_skipped_large': 0, 'chains': 0, 'spans': 0,
              'segs_removed': 0, 'segs_added': 0, 'saved_mm': 0.0,
@@ -6250,12 +6549,22 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                 continue
             if len(net_segs) > max_net_segs:
                 stats['nets_skipped_large'] += 1
+                if chamfer_corners:
+                    # not looked at: say how many corners that leaves
+                    n90 = _right_angle_vertices(net_segs)
+                    if n90:
+                        corners_left['net over size cap'] = (
+                            corners_left.get('net over size cap', 0) + n90)
                 continue
             stats['nets'] += 1
             net_pads = pcb_data.pads_by_net.get(net_id, [])
             net_vias = vias_by_net.get(net_id, [])
             # #2006: built per net, after the nets before it were smoothed.
             in_band = band_meter(pcb_data, config, net_id) if config is not None else None
+            if chamfer_corners:
+                if not dry_run and _chamfer_net_corners(net_id, net_pads, net_vias, in_band):
+                    nets_changed += 1
+                continue
 
             candidates = [s for s in net_segs
                           if not getattr(s, 'graphic', False)
@@ -6740,6 +7049,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                 nets_changed += 1
     finally:
         pcb_data._foreign_seg_arr_trust = _trust_prev
+        if corners_left:
+            stats['corners_left'] = dict(corners_left)
         if hasattr(pcb_data, '_foreign_seg_arr_cache'):
             pcb_data._foreign_seg_arr_cache = None
     if removed_ids:
