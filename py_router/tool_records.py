@@ -48,9 +48,11 @@ Nothing here imports pcbnew. The board functions take any object with
 ``GetFileName`` / ``GetProperties`` / ``SetProperties``, and fall back to an
 in-memory copy for one without the property calls.
 """
+import hashlib
 import json
 import os
 import re
+import time
 
 NAMESPACE = "kicad_routing_tools"
 REV_KEY = "records_rev"
@@ -69,6 +71,51 @@ def _stamp(path):
     except (OSError, ValueError, TypeError):
         return None
     return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+# A stamp younger than this cannot vouch for the content (#2051): two
+# same-size writes inside one timestamp tick (NTFS updates mtime on a ~16 ms
+# clock, FAT on 2 s) leave (mtime, size, inode) unchanged, and an in-place
+# rewrite keeps the inode. An entry cached while its file was this young also
+# keeps the content's digest and is reused only while the digest still
+# matches -- git's "racily clean" rule.
+_RACY_NS = 2_000_000_000
+
+
+def _racy(stamp) -> bool:
+    return stamp is not None and time.time_ns() - stamp[0] < _RACY_NS
+
+
+def _digest(path):
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.blake2b(f.read(), digest_size=16).digest()
+    except OSError:
+        return None
+
+
+def _cache_get(cache, path, stamp):
+    """The cached namespace for ``path`` at ``stamp``, or the miss marker."""
+    hit = cache.get(path)
+    if hit is None or hit[0] != stamp:
+        return _MISS
+    if hit[2] is not None:
+        if _digest(path) != hit[2]:
+            return _MISS
+        if not _racy(stamp):
+            # verified, and the stamp is now old enough to vouch on its own
+            cache[path] = (stamp, hit[1], None)
+    return hit[1]
+
+
+def _racy_digest(path, stamp):
+    """The digest to cache with an entry: taken BEFORE the content is read,
+    so a write landing between the two leaves a digest that no longer
+    matches, never a stale namespace under the new content's digest."""
+    return _digest(path) if _racy(stamp) else None
+
+
+_MISS = object()
 
 
 def kicad_unescape(s: str) -> str:
@@ -129,9 +176,10 @@ def board_namespace(pcb_path: str):
     if not pcb_path:
         return None
     stamp = _stamp(pcb_path)
-    hit = _BOARD_CACHE.get(pcb_path)
-    if hit is not None and hit[0] == stamp:
-        return hit[1]
+    hit = _cache_get(_BOARD_CACHE, pcb_path, stamp)
+    if hit is not _MISS:
+        return hit
+    dig = _racy_digest(pcb_path, stamp)
     ns = None
     if stamp is not None:
         try:
@@ -143,7 +191,7 @@ def board_namespace(pcb_path: str):
                 ns = v if isinstance(v, dict) else None
         except (OSError, ValueError):
             ns = None
-    _BOARD_CACHE[pcb_path] = (stamp, ns)
+    _BOARD_CACHE[pcb_path] = (stamp, ns, dig)
     return ns
 
 
@@ -153,9 +201,10 @@ def project_namespace(pro_path: str) -> dict:
     if not pro_path:
         return {}
     stamp = _stamp(pro_path)
-    hit = _PRO_CACHE.get(pro_path)
-    if hit is not None and hit[0] == stamp:
-        return hit[1]
+    hit = _cache_get(_PRO_CACHE, pro_path, stamp)
+    if hit is not _MISS:
+        return hit
+    dig = _racy_digest(pro_path, stamp)
     ns = {}
     if stamp is not None:
         try:
@@ -164,7 +213,7 @@ def project_namespace(pro_path: str) -> dict:
             ns = v if isinstance(v, dict) else {}
         except (OSError, ValueError, AttributeError):
             ns = {}
-    _PRO_CACHE[pro_path] = (stamp, ns)
+    _PRO_CACHE[pro_path] = (stamp, ns, dig)
     return ns
 
 

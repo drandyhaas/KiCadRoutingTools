@@ -249,6 +249,14 @@ REGISTRY = {
     'kicad_routing_plugin/placement_run.py': (
         'file_mtime',
         'strftime run-directory name, and picks the newest artifact by mtime'),
+    'py_router/tool_records.py': (
+        'file_mtime',
+        'caches each board/project namespace on its (st_mtime_ns, size, inode) '
+        'stamp, and compares that mtime with time.time_ns() to tell a stamp '
+        'too young to vouch for the content (#2051: two same-size writes in '
+        'one mtime tick): such an entry is re-checked against a content '
+        'digest. The clock decides only whether the file is re-hashed, never '
+        'what is read'),
     'py_router/route_movie.py': (
         'file_mtime',
         'orders a run directory\'s boards by os.path.getmtime (then name) '

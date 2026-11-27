@@ -199,7 +199,7 @@ The DRC checker validates:
 
 22. **`.kicad_dru` `hole_clearance` rules** (`track-hole`, `via-hole`, `pad-hole`) - Every `(constraint hole_clearance (min ..))` rule, graded as KiCad's `hole_clearance` (`check_drc.hole_rule_grade`): every via drill, plated and NPTH hole against the copper of each track, via and pad of ANOTHER net (two net-less items are one net), on each copper layer both occupy (a blind or buried via's hole on its own span only). The value binding a pair is KiCad's: a pad clearance override on either item first (floored at the board minimum), else the last matching rule in file order, read either way round by the `design_rules` resolver, a `(layer ...)` clause scoping the copper item's layer; else the board minimum. One pass grades all three (check 7). A rule REPLACES the minimum, below it too, never below this tool's own floor at a hole with no copper around it (the NPTH fab floor for a track, the copper clearance for a track or a via). Where the two items' copper also fails its clearance, the hole row stands or yields as check 7 says. One row per pair of items, naming its rule (`required_mm`, `rule`); a `(severity ignore)` rule decides its pairs and reports nothing, a `warning` rule's rows are warnings. A rule whose condition the resolver cannot read is named `NOT GRADED (hole_clearance)`, and the pairs it may bind are graded at the board minimum. Zone fill is not graded (KiCad's filler knocks out at the rule). Measured on kicad-cli 10.0.6 on probe boards (`tests/test_dru_hole_clearance_grade.py`) and on three corpus boards with JLCPCB- and PCBWay-style rules, tightened until they bite: every pair kicad-cli reports, check_drc reports. kicad-cli stops testing an item's neighbours on a layer after its first violation there, so it may list fewer pairs than check_drc, and a different subset from run to run. No routing step honours the rule: copper is kept off another net's NPTH holes at the board's `min_hole_clearance` (or the fab floor) and off plated holes at the copper clearance, so every routing step that reads the rules lists it NOT honoured (`JSON_SUMMARY.design_rules.unsupported_rules`).
 
-A clearance or `track_width` rule whose only unread terms are courtyard predicates (`A.insideCourtyard('U1')`, ...) is graded by where each item stands (#1832; a via's sizes since #1805): a track by its capsule, a pad by its copper, against the part's drawn courtyard, as kicad-cli 10.0.6 reads them; a row such a rule priced names it (`courtyard_rule`, with its `required_mm`), and its severity is the rule's. A `.kicad_dru` clearance rule check_drc does not model otherwise (`A.getField(...)`, a layer clause beside a name term) is named `NOT GRADED (clearance)` (#1490). The violations it MAY make legal -- the rule relaxes the pair's requirement to a value the gap meets, and its condition, read three-valued with the unmodelled terms unknown, does not rule the pair out -- stay counted but are tagged `unverified_rule` (#1528): a console line `UNVERIFIED (clearance): N violation(s) ...`, the `--json` `unverified` count and `board_score`'s `drc.unverified` say how many of the count KiCad may not report. A clearance or `track_width` rule whose only unread terms are rule-area predicates (`A.insideArea('ROOM')`, `intersectsArea`, `enclosedByArea`) is graded the same way (#1843), each track, via and pad against the board's named rule areas as KiCad reads them: an item partly inside an area is in it, on the copper layers the area is drawn on; `enclosedByArea` wants the whole item inside; and a pair is bound when either item is, unless the rule asks it of both. The run lists such rules as `Area-scoped clearance rules`, and a rule naming an area the board does not draw as a rule area stays `NOT GRADED`. The routing steps do not read these rules. A `hole_clearance` rule of the same kind is graded the same way by the copper-to-hole pass, each hole and copper item by where it stands, a pair asked on each copper layer the two share (listed as `Area-scoped hole-clearance rules`); the route step and the generators read that one too (see [Configuration](configuration.md), hole clearance rules).
+A clearance or `track_width` rule whose only unread terms are courtyard predicates (`A.insideCourtyard('U1')`, ...) is graded by where each item stands (#1832; a via's sizes since #1805): a track by its capsule, a pad by its copper, against the part's drawn courtyard, as kicad-cli 10.0.6 reads them; a row such a rule priced names it (`courtyard_rule`, with its `required_mm`), and its severity is the rule's. A clearance rule that names a part (`A.NetName == '/PH' && B.Reference == 'C12'`, or `B.memberOfFootprint('C12')`, #2071) is graded pair by pair through the `design_rules` resolver, read either way round, the last matching rule winning: each pad of the part against the copper of the nets it binds. The run lists such rules as `Part-scoped clearance rules`, and a row such a rule priced names it (`Required clearance: 3.0000mm (rule 'x'; ...)`). `B.Reference` is the pad's part, compared as a net name is (case-insensitive, a `*` / `?` literal a wildcard), and undefined on a track or via, as kicad-cli 10.0.6 reads it. A `.kicad_dru` clearance rule check_drc does not model otherwise (`A.getField(...)`, a layer clause beside a name term) is named `NOT GRADED (clearance)` (#1490). The violations it MAY make legal -- the rule relaxes the pair's requirement to a value the gap meets, and its condition, read three-valued with the unmodelled terms unknown, does not rule the pair out -- stay counted but are tagged `unverified_rule` (#1528): a console line `UNVERIFIED (clearance): N violation(s) ...`, the `--json` `unverified` count and `board_score`'s `drc.unverified` say how many of the count KiCad may not report. A clearance or `track_width` rule whose only unread terms are rule-area predicates (`A.insideArea('ROOM')`, `intersectsArea`, `enclosedByArea`) is graded the same way (#1843), each track, via and pad against the board's named rule areas as KiCad reads them: an item partly inside an area is in it, on the copper layers the area is drawn on; `enclosedByArea` wants the whole item inside; and a pair is bound when either item is, unless the rule asks it of both. The run lists such rules as `Area-scoped clearance rules`, and a rule naming an area the board does not draw as a rule area stays `NOT GRADED`. The routing steps do not read these rules. A `hole_clearance` rule of the same kind is graded the same way by the copper-to-hole pass, each hole and copper item by where it stands, a pair asked on each copper layer the two share (listed as `Area-scoped hole-clearance rules`); the route step and the generators read that one too (see [Configuration](configuration.md), hole clearance rules).
 
 Every rule named `NOT GRADED (<kind>)` is also a row of the `--json` `not_graded` list (#1831), `--quiet` or not: `{rule, kind, reason}`, with `nets` where the pass knows which nets the rule may bind (length, via_count, skew, diff_pair_uncoupled), `constraints` on a `size` row and `clearance_mm` / `condition` on a `clearance` one. While the list is not empty, `violations` is a partial grade: KiCad still grades those rules. `run_drc(..., not_graded=[])` fills the same rows in-process.
 
@@ -2787,6 +2787,19 @@ pass that closes nets at the cost of new violations is kept and its grade says
 so. The first pass that is not kept ends the passes, and a tie keeps the
 earlier board.
 
+The board's recorded floors are the ones its project ships with, so a DRC
+count is only as strict as those (#2060). A net a step narrowed below its
+class (route.py's escalation, down to the Board Setup minimums under
+`--board-rules`) lowers that class in the output project, and the count is
+then at the lowered class: the grade lists each such class in
+`relaxed_rules` (`{class, from, to, nets}`, with `below_board_min` when it
+sits below the input's own minimum clearance), and every line that prints the
+count says `N DRC at relaxed rules (Default 0.2 -> 0.15)`. A `.kicad_dru` rule
+`check_drc` names NOT GRADED is not in the count either, though KiCad grades
+it: the grade carries `ungraded_rules` (how many) and `ungraded_rule_names`,
+and the lines add `; 2 .kicad_dru rule(s) NOT GRADED (...)`. The run's last
+prose line, `AUTOROUTE: shipped <step>: N open, ...`, says both.
+
 ### Usage
 
 ```bash
@@ -2821,7 +2834,9 @@ Options:
                      grown to the minimum annular ring), every other class at
                      its own clearance, and a net that cannot complete there
                      narrowed only down to those minimums (--escalation
-                     board), as the skill routes the user's own rules.
+                     board), as the skill routes the user's own rules. Such
+                     a net lowers its class in the output project, and the
+                     grade says it is at relaxed rules.
   --floor-first      Start every step at the fab floor (the deepest tier)
                      instead of the standard tier with the floor below it
                      (#1522). Not with --board-rules.
@@ -2851,7 +2866,7 @@ follow it (the plugin's Autorouter sub-tab reads nothing else):
 | `AUTOROUTE_PLAN` | after the analysis | the design rules and `rules_why`, planes, parts, pairs, power nets, and `steps`: one `{tag, tool, what, why, optional}` row per step it means to run; an optional row runs only if what comes before calls for it |
 | `AUTOROUTE_STEP` | each step start and end | `state` `running`, then `done` or `failed` (one of each per step run), or `skipped` with its `reason` for a planned step that never ran. An ending carries `seconds`, `rc`, a one-line `result`, the step's own `summary` (escapes, caps moved, pairs routed, routed/failed/vias), the `cmd` and `log`, a route pass's `grade` (open nets, real DRC) and whether it was `kept`, and on failure `error_tail`, the last lines of its log. A step the plan did not list (a fanout's next rung, a re-fan, the pair re-route) names its planned row as `parent` |
 | `AUTOROUTE_DECISION` | when the chain chooses | `{tag, kept, why}`: the fanout rung kept, a re-fan or a route pass kept or not, the pair nets ripped or re-routed |
-| `AUTOROUTE_SUMMARY` | last | the shipped step (`final_step`, `final_tag`), `output`, `open`, `open_nets`, `drc`, `drc_items`, `seconds`; with `error` when nothing shipped |
+| `AUTOROUTE_SUMMARY` | last | the shipped step (`final_step`, `final_tag`), `output`, `open`, `open_nets`, `drc`, `drc_items`, what the `drc` count is not (`relaxed_rules`, `ungraded_rules`, `ungraded_rule_names`, #2060), `seconds`; with `error` when nothing shipped |
 
 `KRT_AUTOROUTE_FAIL_STEPS` (step tags, comma separated) makes those steps run
 a stand-in that exits 3, so a test can drive the failure path on a real board.
@@ -3438,7 +3453,10 @@ feed and an exposed pad split into several pads of one number all draw.
   read from the fill model (`plane_fill_model.get_fill_models`, the copper the
   pour lays around foreign items) and solved on a square mesh, each cell
   weighted by the share of it that is copper. A via, a pad and a track end on
-  the pour meet the cells under their copper.
+  the pour meet the cells under their copper. Whether one is on the pour at
+  all is read off the fill model's own raster (its copper reaches a fill
+  cell), not off the mesh, so a track end beside the fill stays off it at
+  every `--pour-mesh-mm` and wherever the mesh grid falls.
 - `--pour-mesh-mm` — the mesh cell, default 0.25. A 20 x 2 mm strip between
   two pads reads within 1% of `rho * L / (W * t)` at the default.
 - `--via-plating-um` — the barrel wall, default 25. It is an ASSUMPTION about
@@ -3492,6 +3510,15 @@ python3 py_tools/check_reachability.py board.kicad_pcb --pad U3.23 --track 0.15 
   spec change. `--defect-json PATH` then writes the throat coordinates, the
   nearest foreign pads, the shortfall and the relief distance per direction,
   which `render_placement.py --defect-json` crops a panel to.
+- **INCONCLUSIVE** (exit 3) — neither (#2045). A raster bottleneck stands up
+  to 3.5 steps from the continuous one, so a margin inside that is no
+  finding: such a reading is re-measured at halved steps (down to 1 um,
+  within a cell budget) until its margin leaves its own step's resolution,
+  and the verdict is read there, with the coarser readings in `--json`'s
+  `refined_from` and the step's band as `resolution_mm`. Measured: a 46 um
+  step read +1 um PASSABLE for a pad a 5 um step put 89 um short; it now
+  refines to CAGED. Only a reading the budget cannot settle is INCONCLUSIVE;
+  re-measure it on a small `--view` round the throat at a finer `--step`.
 
 `--track` / `--via` / `--clearance` default to the board's Default net class,
 then its `min_track_width` / `min_via_diameter` constraint, then
@@ -3502,7 +3529,8 @@ board with no project), and `--json` carries them as `floors`;
 `--layers` (seed pad's layer first), `--step` (raster, 0.01 mm), `--margin`
 (4 mm view half-size) or `--view` set the measurement window. `--json` prints
 only the JSON; `--json-out PATH` also writes it. Exit 2 when an argument names
-nothing on the board (a ref, a pad number) or the board cannot be read.
+nothing on the board (a ref, a pad number), the board cannot be read, or
+nothing of the net is inside the view (NO-TARGET).
 
 `--part REF` (#1817) asks the question one pad at a time cannot: how many of
 the part's signal nets can leave a window round it (`--margin`, default 3 mm)
@@ -3785,11 +3813,13 @@ a later step's ladder prefers the same ring while the rule still holds that
 value; KiCad and `check_drc` grade the rule (#1914).
 
 The `#530` cap lowers `rules.min_clearance` to the smallest pad clearance
-override the run honoured (KiCad floors an override there). That number
-belongs to one part, so the writeback records it
+override the run honoured (KiCad floors an override there), and the `#498`
+cap to the smallest `.kicad_dru` clearance rule. The first number belongs to
+one part and the second binds only the items its rule names, which route at
+the rule anyway, so the writeback records either
 (`kicad_routing_tools.pad_override_min_clearance`: `{rule, board}`), and
 `--escalation board` reads the board's own minimum (`board`) while the rule
-still holds the capped value (#1369).
+still holds the capped value (#1369, #2060).
 
 The `FAB FLOOR RELAXED` disclosure compares against the floors the board declared
 before the chain began (`kicad_routing_tools.fab_floor_origin`). A floor that

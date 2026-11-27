@@ -6098,7 +6098,8 @@ def copper_keepout_gate(pcb_data, net_keepouts=None):
       `net_keepouts.audit_items`, the geometry the end-of-run audit and
       KiCad's items_not_allowed read.
     Copper is the centreline grown by half its width (a via: its disk), as
-    KiCad grades a rule area; no clearance is added.
+    KiCad grades a rule area; no clearance is added, but for a part's
+    clearance region (#2071), whose own `clearance` is the distance kept.
 
     Returns None when nothing on the board forbids copper (the caller adds no
     test), else `refuses(segments=(), vias=())` -> the reason the first
@@ -6117,8 +6118,11 @@ def copper_keepout_gate(pcb_data, net_keepouts=None):
     if not plain and not netko:
         return None
     plain_boxes = [_ring_box(ko['polygon']) for ko in plain]
-    net_boxes = [None if ko.get('layer_ban') else _ring_box(ko['polygon'])
-                 for ko in netko]
+    # a part's clearance region (#2071) keeps copper its `clearance` off
+    # the ring, as `audit_items` reads it
+    net_boxes = [None if ko.get('layer_ban') else tuple(
+        v + (float(ko.get('clearance') or 0.0) * (1 if i > 1 else -1))
+        for i, v in enumerate(_ring_box(ko['polygon']))) for ko in netko]
 
     def refuses(segments=(), vias=()):
         segs = [s for s in segments if not getattr(s, 'graphic', False)]
@@ -7814,6 +7818,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                       "each track, via and pad stands: "
                       + ", ".join(f"'{r.name}':{r.constraints['clearance']['min']:g}"
                                   for r in _cy_dr.rules if r.name in _area_clr))
+    # #2071: a clearance rule bound to one part (`B.Reference == 'C12'`,
+    # `B.memberOfFootprint('C12')`) is evaluable, and no channel above prices
+    # one part: each pair is resolved pair-exact instead (`_cy_pair`), so the
+    # rule's value stands wherever the resolver lands on it.
+    if _cy_dr is not None:
+        from design_rules import part_scoped_clearance_rule
+        _part_clr = frozenset(r.name for r in _cy_dr.rules if part_scoped_clearance_rule(r))
+        if _part_clr:
+            _cy_clr = _cy_clr | _part_clr
+            _unmodelled_clr = [row for row in _unmodelled_clr if row[0] not in _part_clr]
+            if not quiet:
+                print("Part-scoped clearance rules (.kicad_dru, #2071), graded pair by pair "
+                      "on the named parts' pads: "
+                      + ", ".join(f"'{r.name}':{r.constraints['clearance']['min']:g}"
+                                  for r in _cy_dr.rules if r.name in _part_clr))
     _cy_items: Dict[int, tuple] = {}
 
     def _cy_item(obj):
@@ -7975,6 +7994,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         if cy_rule:
             v['required_mm'] = eff
             v['courtyard_rule'] = cy_rule
+            # the rule's name on the row's console line, as KiCad names it
+            v['required_source'] = f"rule '{cy_rule}'"
         return v
 
     # Resolve the fab-floor minimums for the track-width / via-size checks. Default

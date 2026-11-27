@@ -61,6 +61,7 @@ REGISTRY = {
     'obstacle_map.py:remove_vias_list_from_obstacles': ('composed', '@_area_composed'),
     'obstacle_map.py:add_pads_via_keepout': ('composed', '@_area_composed'),
     'obstacle_map.py:remove_pads_via_keepout': ('composed', '@_area_composed'),
+    'plane_obstacle_builder.py:exposed_pad_array_window': ('composed', '@_area_composed'),
     'plane_obstacle_builder.py:build_via_obstacle_map': ('composed', '@_area_composed_builder'),
     'plane_obstacle_builder.py:build_routing_obstacle_map': ('composed', '@_area_composed_builder'),
     'plane_region_connector.py:build_base_obstacles': ('composed', '@_area_composed_builder'),

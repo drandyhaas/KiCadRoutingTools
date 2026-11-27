@@ -176,7 +176,7 @@ python3 py_router/route_diff.py in.kicad_pcb out.kicad_pcb --nets "/DQS_P" "/DQS
 | `--via-span-type` | read off the span | The via type written for `--via-span`: `micro`, `blind` or `buried` |
 | `--via-span-escape` | off | With `--via-span`: `route` first lays an escape (a via of the span beside each surface pad of the selected nets, and the short track to it), then routes; `only` lays the escapes and routes nothing |
 | `--grid-step` | 0.1 | Grid resolution in mm |
-| `--same-net-pad-clearance` | the project's recorded value, else -1 | Edge-to-edge clearance (mm) between every via the run places and same-net pads (#581). `> 0` keeps vias off same-net SMD pads and off the net's solder-paste openings (#962), i.e. no via-in-pad, and is recorded in the sibling `.kicad_pro` so later chain steps inherit it; `-1` allows via-in-pad. On every routing CLI (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`) |
+| `--same-net-pad-clearance` | the project's recorded value, else -1 | Edge-to-edge clearance (mm) between every via the run places and same-net pads (#581). `> 0` keeps vias off same-net SMD pads and off the net's solder-paste openings (#962), i.e. no via-in-pad (one exception: `route_planes.py`'s thermal array under an exposed pad is exempt from that pad, never from its paste, #2063), and is recorded in the sibling `.kicad_pro` so later chain steps inherit it; `-1` allows via-in-pad. On every routing CLI (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`) |
 
 **Impedance-controlled routing:** When `--impedance` is specified, track widths are automatically calculated per layer using IPC-2141 formulas based on the board stackup. Outer layers use microstrip formulas (typically wider tracks) and inner layers use stripline formulas (typically narrower tracks). Via clearance calculations account for the varying track widths per layer.
 
@@ -195,7 +195,7 @@ the Route tab). The defaults (`auto`, `fab`) live in `routing_defaults.py`
 |--------|---------|-------------|
 | `--fab-tier` | `auto` | `auto` (the standard floor, escalating to advanced when a fine-pitch fan-out, plane tap or last-resort via cannot fit; warned and counted), `standard` (no extra fab cost, **hard**) or `advanced` (tighter, "more costly", **hard**) |
 | `--fab-overrides` | - | Path to a file overlaying the tier's floors (only the keys it lists) |
-| `--escalation` | `fab` | How far below a **requested** size a failing net may be retried: `fab` (down to the fab tier floor, below the board's own minimums; completion first, every narrowing disclosed), `board` (down to the board's own Board Setup minimums; an unset key falls back to the fab tier floor, except clearance, which falls back to the Default net class's clearance, #1160; a `min_clearance` the writeback lowered to a pad clearance override is not read as the board's own minimum: the value it replaced is recorded in `kicad_routing_tools.pad_override_min_clearance` and read instead while the rule still holds the capped value, #1369; with `--no-fix-drc-settings` descents stop at what KiCad grades the unchanged project at: a rule it leaves out at KiCad's factory value, #1287, and clearance at the Default class floored at `min_clearance`, #1262), `off` (never; the net fails and is reported -- except a wide power/impedance net's pad-entry neck of at most 2 mm of path, `routing_defaults.PAD_ENTRY_NECK_MM`) |
+| `--escalation` | `fab` | How far below a **requested** size a failing net may be retried: `fab` (down to the fab tier floor, below the board's own minimums; completion first, every narrowing disclosed), `board` (down to the board's own Board Setup minimums; an unset key falls back to the fab tier floor, except clearance, which falls back to the Default net class's clearance, #1160; a `min_clearance` the writeback lowered to a pad clearance override or a `.kicad_dru` clearance rule is not read as the board's own minimum: the value it replaced is recorded in `kicad_routing_tools.pad_override_min_clearance` and read instead while the rule still holds the capped value, #1369 / #2060; with `--no-fix-drc-settings` descents stop at what KiCad grades the unchanged project at: a rule it leaves out at KiCad's factory value, #1287, and clearance at the Default class floored at `min_clearance`, #1262), `off` (never; the net fails and is reported -- except a wide power/impedance net's pad-entry neck of at most 2 mm of path, `routing_defaults.PAD_ENTRY_NECK_MM`) |
 | `--strict-sizes` | off | Exit 3 when any feature was delivered below its requested size or a fab-tier escalation fired -- on every routing CLI that takes it (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`); an exit code the run already had for its own reason wins. For a net with its own width -- `--power-nets`, an impedance width, a wider net class -- this means copper that SHIPS under width (one `design_rules` row per net), not every narrower routing attempt: a power net on `route.py` is measured over the whole net (#1033); an impedance- or class-width net, `repair_planes.py`'s `--power-nets` taps, and on `route_diff.py` every pair member -- one routed single-ended by the member fallback (a `pair member fallback copper shipped under width` row, #1679) and one routed coupled (a `coupled pair copper shipped under width` row in place of its per-attempt `terminal neck` and `pair partner neck` rows, graded against the layer's width with the connectors the pair router draws at the pair's track width counted as delivered, #1725), and one coupled narrowed to fit where its layer width found no coupled route (a `coupled pair narrowed to fit, both members` row, #1742) -- over the copper the run laid, so a fanout stub an earlier step drew at its own width is not counted. A row is a request not met, not a KiCad DRC flag: KiCad grades a track only against the board's minimum track width and `.kicad_dru` track_width rules, never a net class width |
 
 The tier is a **floor ladder**:
@@ -307,6 +307,27 @@ copper inside a region (from a path that does not stamp the region, such as a
 post-route pass, or already in the input) is printed and reported as
 `net_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (`[]` =
 clean; absent when the board has no such rule).
+
+**Clearance round one part.** A `.kicad_dru` clearance rule that keeps a net
+or class away from one part, e.g.
+`(rule "phase_c_off_C12" (constraint clearance (min 3mm)) (condition "A.NetName == '/OUT_E_PHASE_C' && B.Reference == 'C12'"))`
+or the same with KiCad's `B.memberOfFootprint('C12')` (#2071), is routed to by
+every routing step (no flag, no GUI control). Each pad of the part becomes a
+net-filtered keep-out on the pad's copper layers: the pad's copper outline with
+the rule's value as its clearance, so a bound net's track and via EDGES stay that
+far from the pad's copper, as KiCad measures a clearance. Which nets, layers and
+items (tracks, through vias) a pad binds comes from the resolver, either way
+round and the last matching rule winning, so a later rule that relaxes the pair
+is respected; a pad is kept out only where the rule is above the pair's class
+clearance. The console says `.kicad_dru rule 'phase_c_off_C12': honoured as a
+part keep-out: 1 net(s) kept 3 mm (copper edge to pad edge) from 2 pad(s) of C12`,
+and the shipped-board audit above counts bound-net copper left inside a pad's
+reach. `B.Reference` reads the pad's part, compared as a net name is
+(case-insensitive, a `*` / `?` literal a wildcard), and is undefined on a track
+or via (kicad-cli 10.0.6, `tests/oracle/constraint_agreement.py` `part_*` rows).
+A part term under `!`, beside an `||`, or `B.Reference != 'X'` (every other part)
+is not routed to and stays `NOT honoured`, as does a rule naming only a pad
+number (`A.Pad_Number`); check_drc grades every rule that names a part.
 
 **Clearance in a rule area.** A `.kicad_dru` clearance rule whose condition
 is one rule-area predicate or an OR of them, e.g.
@@ -1017,7 +1038,7 @@ The options above are on both `route.py` and `route_diff.py` unless marked.
 | `--bga-proximity-cost` | 0.2 | Cost penalty at BGA edge (mm equivalent) |
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize on same layer (mm) |
 | `--track-proximity-cost` | 0.0 | Cost penalty near routed tracks (0 = disabled) |
-| `--keep-away AGG:VICTIM:GAP` | (off) | Soft keep-away between two net groups (#1146), repeatable. While a net of one side routes, cells where its track would sit closer than GAP mm (edge to edge, same layer) to the other side's copper cost `--keep-away-cost`. Each side is comma-separated net patterns as in `--nets` and/or net classes as `class=NAME` (`!class=NAME` takes one out), e.g. `class=Digital:class=Audio:0.5`. `route.py` and `route_diff.py`. The board's design brief may declare rules too (its `keep_away` list, #1253); they are added to these with no flag. See [Keep-away](api-routing-config.md#pairwise-keep-away-keep_away--keep_away_free--keep_away_cost) |
+| `--keep-away AGG:VICTIM:GAP` | (off) | Soft keep-away between two net groups (#1146), repeatable. While a net of one side routes, cells where its track would sit closer than GAP mm (edge to edge, same layer) to the other side's copper -- pads, tracks, vias and pours (a pour's band from its zone outline, #2070) -- cost `--keep-away-cost`. `AGG:VICTIM:GAP:adjacent` also prices the other side's copper on the copper layers next to the routed one, in plan view. Each side is comma-separated net patterns as in `--nets` and/or net classes as `class=NAME` (`!class=NAME` takes one out), e.g. `class=Digital:class=Audio:0.5`. `route.py` and `route_diff.py`. The board's design brief may declare rules too (its `keep_away` list, #1253); they are added to these with no flag. See [Keep-away](api-routing-config.md#pairwise-keep-away-keep_away--keep_away_free--keep_away_cost) |
 | `--keep-away-free` | 1.5 | Within this distance of the routed net's own pads the keep-away band is not priced (mm) |
 | `--keep-away-cost` | 0.5 | Cost per cell inside a keep-away band (mm equivalent; 0 = measure and report only) |
 | `--vertical-attraction-radius` | 1.0 | Radius for cross-layer track attraction (mm) |
@@ -1443,7 +1464,7 @@ class GridRouteConfig:
     track_proximity_cost: float = 0.0      # mm equivalent (0 = disabled)
 
     # Pairwise keep-away between net groups (#1146)
-    keep_away: Tuple[str, ...] = ()        # 'AGG:VICTIM:GAP' rules
+    keep_away: Tuple[str, ...] = ()        # 'AGG:VICTIM:GAP[:adjacent]' rules
     keep_away_free: float = 1.5            # mm around the routed net's own pads
     keep_away_cost: float = 0.5            # mm equivalent per cell (0 = report only)
 

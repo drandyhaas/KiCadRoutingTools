@@ -501,8 +501,11 @@ edge-class part.
 ```
 
 Each entry is ONE rule in route.py's `--keep-away` syntax: `AGGRESSOR:VICTIM:
-GAP`, with net patterns and `class=` terms, as a string or as an object with
-`rule` and the usual prose slots. `"keep_away": "unknown"` says the author
+GAP[:adjacent]`, with net patterns and `class=` terms, as a string or as an
+object with `rule` and the usual prose slots. The router prices the other
+side's pours too, and `:adjacent` asks it to price the layers next to the
+routed one as well (#2070, [Keep-away](api-routing-config.md#pairwise-keep-away-keep_away--keep_away_free--keep_away_cost));
+the placement grade below measures pads in plan view either way. `"keep_away": "unknown"` says the author
 looked and cannot yet say which nets are noisy. A malformed rule is refused
 with the rule parser's own message. A string holding two rules, or one rule
 twice, is refused as well.
@@ -524,6 +527,14 @@ two copies. Both read it through `keep_away.brief_rule_rows`:
   `route.py` and `route_diff.py` refuse a malformed `keep_away` there before
   routing (exit 2, the parser's message); it is never skipped.
   The brief travels with every routed output, so later steps keep it.
+- The planes step's stitch pass (`route_planes.py --stitch-vias` /
+  `--stitch-edge-fence`, and the GUI's Planes tab) reads the same key the
+  same way, in `create_plane` (#2066). It has no cost search to price a band
+  in, so there the band is a site gate: a stitch or fence via whose disk
+  would come closer than GAP to the other side's copper, outside the free
+  radius round its own net's pads, is passed over for the next candidate of
+  its nudge ring, and the stitch summary counts the sites the band gave up.
+  The pour itself is KiCad's fill, which reads `.kicad_dru`, not the brief.
 
 On the `--intent` path a rule the brief declares and the intent lacks drifts.
 So does a rule the intent carries from the brief that the brief no longer

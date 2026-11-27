@@ -15,6 +15,16 @@ Euclidean distance transform plus an exact Kruskal widest path (see
     CAGED    -- no route exists at ANY grid. This one IS geometry, and the fix
                 is placement or a spec change.
 
+A raster bottleneck stands up to 3.5 steps from the continuous one (#2045: a
+46 um step read +1 um PASSABLE for a pad a 5 um step put 89 um short), so a
+margin inside that is no verdict. Such a reading is refined at halved steps,
+down to 1 um and within a cell budget, until its margin leaves its step's
+resolution; the coarser readings are listed (`refined_from`). One the budget
+cannot settle is reported as
+
+    INCONCLUSIVE -- neither: re-measure on a small --view round the throat at
+                    a finer --step.
+
 The verdict grades the PLACEMENT: pads, parts, rule areas, footprint copper and
 locked copper. A board's ROUTED copper -- every track and via a router could
 rip -- is set aside for it (#1347), because CAGED sends a run back to placement
@@ -39,7 +49,8 @@ would actually route at rather than at a guessed round number -- and then
 pinned UP to the fab floor, because this tool PREDICTS routability and a lane
 finer than any fab can etch is capacity nobody can build (see `_fab_wrap`).
 
-Exit codes: 0 PASSABLE, 1 CAGED, 2 usage/geometry error.
+Exit codes: 0 PASSABLE, 1 CAGED, 2 usage/geometry error (or nothing to
+reach inside the view), 3 INCONCLUSIVE.
 
 **1 is reserved for the geometry verdict and nothing else.** An argument that
 names nothing on this board -- a misspelled ref, a pad number that is not there,
@@ -382,8 +393,10 @@ def main(argv=None):
                         "the sibling .kicad_pro on top of this")
     p.add_argument('--step', type=float, default=0.01,
                    help="raster step in mm (default 0.01). A throat is only "
-                        "resolved to +/- one step, so halve it if the margin "
-                        "comes out inside a step of zero")
+                        "resolved to +/- 3.5 steps; a margin inside that is "
+                        "refined at halved steps (to 1 um, within a cell "
+                        "budget), and one still inside it is INCONCLUSIVE "
+                        "(exit 3)")
     p.add_argument('--margin', type=float, default=None,
                    help="half-size of the view around the seed, mm "
                         "(default 4.0; with --part, the window round the "
@@ -636,19 +649,23 @@ def main(argv=None):
                 # tigard U3.30 at one view: native step 0.01 gave bottleneck
                 # 0.4403, the widened 0.02021 gave 0.46904 -- 29 um
                 # OPTIMISTIC, more than one whole step, and optimistic is the
-                # direction that hides a cage.
-                coarse = step2 > track / 4.0 + 1e-12
+                # direction that hides a cage. #2045: a margin inside the
+                # step's resolution was refined (`refined_from`), so the step
+                # judged here is the one the verdict was read at.
+                coarse = r.step_mm > track / 4.0 + 1e-12
                 auto_widened = {
                     'view': [round(v, 2) for v in (x0, y0, x1, y1)],
                     'step_mm': step2,
                     'nearest_island_mm': round(best[0], 2),
                     'coarse': coarse}
                 if coarse:
-                    _msg = (f"COARSE: the widened step {step2:g}mm is more "
-                            f"than a quarter of the {track:g}mm track, and a "
-                            f"bottleneck is resolved to +/- one step -- treat "
-                            f"this verdict as a locate, then re-measure the "
-                            f"throat on a small --view at --step {args.step:g}")
+                    _msg = (f"COARSE: the widened step {r.step_mm:g}mm is "
+                            f"more than a quarter of the {track:g}mm track, "
+                            f"and a bottleneck is resolved to +/- "
+                            f"{reachability.RESOLUTION_STEPS:g} steps -- "
+                            f"treat this verdict as a locate, then "
+                            f"re-measure the throat on a small --view at "
+                            f"--step {args.step:g}")
                     auto_widened['coarse_note'] = _msg
                     r.note = f"{r.note} | {_msg}" if r.note else _msg
                     print(f"  {label}{_msg}", file=sys.stderr)
@@ -692,8 +709,9 @@ def main(argv=None):
             'near': [dict(n) for n in (r_cu.near or ())],
             # The routing alone cages a pad the placement does not: a
             # ROUTING finding (rip up / reroute), never a placement one.
-            'cages_the_pad': bool(r_cu.caged and r.target_cells
-                                  and not r.caged)}
+            # Both readings DECIDED (#2045): an INCONCLUSIVE one is neither.
+            'cages_the_pad': (r_cu.verdict == 'CAGED'
+                              and r.verdict == 'PASSABLE')}
         if aw_cu:
             routed['auto_widened'] = aw_cu
 
@@ -797,7 +815,7 @@ def main(argv=None):
                           f"ASSUMED at the same clearance: the gap above is "
                           f"twice the room on the known side, not a distance "
                           f"between two named objects")
-            if r.caged:
+            if r.verdict in ('CAGED', 'INCONCLUSIVE'):
                 _side = max(0.5, 4.0 * (r.track_mm - (r.bottleneck_mm or 0.0)))
                 print(f"look at it:\n"
                       f"  python3 -X utf8 py_tools/render_placement.py "
@@ -813,7 +831,8 @@ def main(argv=None):
                   if routed['margin_um'] is not None else '')
             print(f"           with the routing in place: "
                   f"{routed['verdict']}{_m}")
-            if routed['throat'] and (r_cu.caged or routed['cages_the_pad']):
+            if routed['throat'] and (r_cu.verdict in ('CAGED', 'INCONCLUSIVE')
+                                     or routed['cages_the_pad']):
                 _t = routed['throat']
                 _who = ', '.join(n.get('pad') or f"{n['kind']}@{n['net']}"
                                  for n in routed['near'])
@@ -823,7 +842,7 @@ def main(argv=None):
                 print("           -> ROUTED COPPER cages this pad, the "
                       "placement does not: a ROUTING finding (rip up or "
                       "reroute that copper), not a placement one.")
-        if r.target_cells and not r.caged:
+        if r.verdict == 'PASSABLE':
             print("\nPASSABLE means a route EXISTS at this width. If the "
                   "router failed here, that is a finding about the router "
                   "(grid, ordering, ripup budget) -- not about the board.")
@@ -831,7 +850,12 @@ def main(argv=None):
     # reported as one: exit 2 so a script cannot read it as PASSABLE.
     if r.target_cells == 0:
         return 2
-    return 1 if r.caged else 0
+    # #2045: a margin inside the raster's resolution, at the finest step the
+    # refinement could afford, is not a finding either way -- exit 3, so a
+    # gate reads it as neither PASSABLE (0) nor the CAGED verdict (1).
+    if r.verdict == 'INCONCLUSIVE':
+        return 3
+    return 1 if r.verdict == 'CAGED' else 0
 
 
 if __name__ == '__main__':

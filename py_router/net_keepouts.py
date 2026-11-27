@@ -21,6 +21,11 @@ nets come from the resolver's own evaluator (NetName, NetClass, Type, layer
 predicates ...), separately for tracks and for vias; a rule it cannot model
 completely stays reported as NOT honoured rather than half-applied.
 
+A clearance rule bound to one part (#2071, `derive_part_clearance_keepouts`:
+`A.NetName == '/PH' && B.Reference == 'C12'`) is a region per pad of the part,
+the pad's copper outline with the rule's value as its `clearance`, which the
+rasteriser and `audit_items` both read as an edge-to-edge distance.
+
 An `edge_clearance` rule that binds some nets harder than others (#1678,
 `derive_edge_bands`) takes the same stamp: the board's static edge band is the
 lowest floor over the nets, and a net above it gets the rest while it routes.
@@ -238,6 +243,170 @@ def derive_area_keepouts(rules, pcb_data) -> List[dict]:
             what += "; enclosedByArea read as intersectsArea (keeps out more)"
         rule.honoured = what
     return regions
+
+
+def _pad_copper_rings(pad) -> List[List[Tuple[float, float]]]:
+    """The outline(s) of a pad's copper, as check_drc measures it
+    (`_pad_copper_core`: the core grown by its corner radius), with every arc
+    vertex pushed out so the ring circumscribes the copper."""
+    import math
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+    from check_drc import _pad_copper_core
+    polys, r = _pad_copper_core(pad)
+    parts = []
+    for poly in polys:
+        pts = list(dict.fromkeys((float(x), float(y)) for x, y in poly))
+        if len(pts) == 1:
+            parts.append(Point(pts[0]))
+        elif len(pts) == 2 or Polygon(pts).area <= 1e-12:
+            parts.append(LineString(pts))
+        else:
+            parts.append(Polygon(pts))
+    if not parts:
+        return []
+    geom = unary_union(parts)
+    q = 8
+    if r > 1e-9:
+        geom = geom.buffer(r / math.cos(math.pi / (4 * q)), quad_segs=q)
+    out = []
+    for g in getattr(geom, 'geoms', [geom]):
+        ext = getattr(g, 'exterior', None)
+        if ext is not None:
+            ring = [(float(x), float(y)) for x, y in ext.coords][:-1]
+            if len(ring) >= 3:
+                out.append(ring)
+    return out
+
+
+#: The `router_unhonoured` prefix parse_dru gives a clearance rule a part or
+#: pad term scopes (design_rules._reads_one_part).
+_ONE_PART_PREFIX = 'clearance scoped by '
+
+
+def derive_part_clearance_keepouts(rules, pcb_data) -> List[dict]:
+    """#2071: the keep-outs a clearance rule bound to one PART defines --
+    `(rule "x" (constraint clearance (min 3mm)) (condition "A.NetName ==
+    '/PH' && B.Reference == 'C12'"))`, or `B.memberOfFootprint('C12')`. The
+    obstacle map prices a net against a pad type, never against one part, so
+    such a rule becomes one region per pad of the part, on the pad's copper
+    layers: the pad's copper outline with the rule's value as the region's
+    `clearance` (the rasteriser keeps a track's EDGE that far from it, as
+    KiCad measures a clearance), bound to the nets the rule holds there and
+    stamped only while one of them routes, like every net-filtered keep-out.
+
+    Which nets, layers and items a pad's region binds comes from the
+    resolver itself (`DesignRules.resolve`: commutative, last match wins,
+    the rule REPLACING the class value), per net, copper layer and item kind
+    (a track, a through via): a pad gets a region where THIS rule is the one
+    the resolver lands on and its value is above the class pair's, which the
+    router already keeps. A rule the resolver cannot land on a part's pads
+    alone -- a part term under `!`, beside an `||`, `Reference != 'X'` --
+    keeps its NOT honoured line. Sets `rule.honoured` on each rule read."""
+    from design_rules import (_footprint_named, _part_confines, _part_patterns,
+                              _reads_one_part, _rule_matches, netname_matches)
+    from net_queries import expand_pad_layers
+    from paste_apertures import pad_has_copper
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None)
+                  or rules.copper_layers or [])
+    nets = {nid: n.name for nid, n in pcb_data.nets.items() if nid and n.name}
+    out: List[dict] = []
+    names_ctx = None
+    # whether any clearance rule the resolver reads can answer differently by
+    # layer: when none can, a pair is resolved once for all its pad's layers
+    layered = any(r.layer_clause is not None or _layer_dependent(r.condition)
+                  for r in rules.rules
+                  if 'clearance' in r.constraints and not r.unsupported)
+    for rule in rules.rules:
+        spec = rule.constraints.get('clearance') or {}
+        if (rule.unsupported or rule.condition is None or spec.get('min') is None
+                or not str(rule.router_unhonoured or '').startswith(_ONE_PART_PREFIX)):
+            continue
+        term = _reads_one_part(rule.condition) or ''
+        if term.endswith('.Pad_Number') and not _part_patterns(rule.condition, set()):
+            continue                  # one pad number across every part
+        if not _part_confines(rule.condition):
+            rule.router_unhonoured = (
+                f"{_ONE_PART_PREFIX}{term}: routed to only where the condition holds "
+                f"on the named parts' pads alone (B.Reference == 'X' or "
+                f"B.memberOfFootprint('X') ANDed in, not negated or OR'ed)")
+            continue
+        pats = _part_patterns(rule.condition, set())
+        if names_ctx is None:
+            names_ctx = ('clearance', frozenset(nets.values()))
+        lay_dep = rule.layer_clause is not None or _layer_dependent(rule.condition)
+        refs: set = set()
+        n_pads = 0
+        bound_nets: set = set()
+        for key, fp in sorted((getattr(pcb_data, 'footprints', None) or {}).items()):
+            ref, lib = rules.footprint_ids.get(key, (key, None))
+            if not any(_footprint_named(p, ref, lib) or netname_matches(ref or '', p)
+                       for p in pats):
+                continue
+            for pad in fp.pads:
+                if not pad_has_copper(pad) or pad.size_x <= 0 or pad.size_y <= 0:
+                    continue
+                layers = [l for l in expand_pad_layers(list(pad.layers or ()), copper)
+                          if l in copper]
+                if not layers:
+                    continue
+                pit = rules.item_for_pad(pad)
+                # (kinds, value) -> net name -> layers
+                hits: Dict[Tuple[str, float], Dict[str, set]] = {}
+                for nid, net in nets.items():
+                    if nid == pad.net_id:
+                        continue           # a clearance binds two nets
+                    for kind in ('track', 'via'):
+                        facts = {'via_type': 'through'} if kind == 'via' else {}
+                        probe = layers if lay_dep else layers[:1]
+                        if not any(_rule_matches(rule, rules.item_for_net(nid, kind, l, **facts),
+                                                 pit, l, copper, names_ctx) for l in probe):
+                            continue
+                        base = max([v for v in (rules.class_value(nid, 'clearance'),
+                                                rules.class_value(pad.net_id, 'clearance'))
+                                    if v is not None] or [0.0])
+                        for l in (layers if layered else layers[:1]):
+                            it = rules.item_for_net(nid, kind, l, **facts)
+                            c = rules.resolve('clearance', it, pit, l)
+                            if (c.min_rule != rule.name or c.min is None
+                                    or c.min <= base + 1e-9):
+                                continue
+                            hits.setdefault((kind, round(float(c.min), 6)), {}).setdefault(
+                                net, set()).update([l] if layered else layers)
+                if not hits:
+                    continue
+                groups: Dict[Tuple[float, FrozenSet[str], FrozenSet[str]], set] = {}
+                for (kind, value), by_net in hits.items():
+                    by_layers: Dict[FrozenSet[str], set] = {}
+                    for net, lays in by_net.items():
+                        by_layers.setdefault(frozenset(lays), set()).add(net)
+                    for lays, nset in by_layers.items():
+                        groups.setdefault((value, frozenset(nset), lays), set()).add(kind)
+                rings = _pad_copper_rings(pad)
+                if not rings:
+                    continue
+                n_pads += 1
+                refs.add(ref or key)
+                for (value, nset, lays), ks in sorted(
+                        groups.items(), key=lambda g: (g[0][0], sorted(g[0][1]), sorted(g[0][2]))):
+                    bound_nets |= nset
+                    for ring in rings:
+                        out.append({
+                            'name': f"{rule.name} ({ref or key}.{pad.pad_number})",
+                            'rule': rule.name, 'polygon': ring, 'holes': [],
+                            'layers': set(lays), 'clearance': value,
+                            'part_clearance': True,
+                            'tracks_allowed': 'track' not in ks,
+                            'vias_allowed': 'via' not in ks, 'nets': nset})
+        rule.router_unhonoured = None
+        if n_pads:
+            rule.honoured = (f"honoured as a part keep-out: {len(bound_nets)} net(s) kept "
+                             f"{spec['min']:g} mm (copper edge to pad edge) from {n_pads} "
+                             f"pad(s) of {', '.join(sorted(refs))}")
+        else:
+            rule.honoured = ("read as a part keep-out: it binds no pad of this board "
+                             "above its class clearance, so it keeps nothing out")
+    return out
 
 
 def derive_layer_bans(rules, pcb_data) -> List[dict]:
@@ -747,13 +916,23 @@ def _stamper(pcb_data, idx: Tuple[int, ...]):
     kos = pcb_data._net_keepouts
     # mask_keepouts=False: the board's own map stamps the mask artwork; this
     # pass adds only the net-filtered keep-outs
+    plain = [kos[i] for i in idx
+             if not kos[i].get('edge_band') and not kos[i].get('part_clearance')]
+    parts = [kos[i] for i in idx if kos[i].get('part_clearance')]
     shim = SimpleNamespace(board_info=SimpleNamespace(
-        keepouts=[kos[i] for i in idx if not kos[i].get('edge_band')],
+        keepouts=plain + parts,
         board_bounds=getattr(pcb_data.board_info, 'board_bounds', None),
         mask_keepouts=False))
     bands = [kos[i] for i in idx if kos[i].get('edge_band')]
 
     def stamp_into(sink, cfg):
+        if parts:
+            # a part's clearance region (#2071) carries its own clearance,
+            # which replaces the config's -- and with it the member offset a
+            # centreline config folds into its clearance, so that is added back
+            off = float(getattr(cfg, 'edge_extra_clearance', 0.0) or 0.0)
+            shim.board_info.keepouts = plain + [
+                dict(ko, clearance=ko['clearance'] + off) for ko in parts]
         if shim.board_info.keepouts:
             # a centreline config's clearance carries the member half-pitch's
             # scalar; what a layer's own half-pitch adds past it rides here
@@ -1006,6 +1185,11 @@ def audit_items(pcb_data, segments, vias, keepouts):
         def near(x, y, r):
             return any(point_to_polygon_edge_distance(x, y, rg) < r - eps for rg in rings)
 
+        # a part's clearance region (#2071) forbids copper within its
+        # `clearance` of the ring (edge to edge), every other region its
+        # inside (0.0 or no key)
+        gap = float(ko.get('clearance') or 0.0)
+
         def hit(xa, ya, xb, yb, r):
             if (max(xa, xb) < x0 - r or min(xa, xb) > x1 + r
                     or max(ya, yb) < y0 - r or min(ya, yb) > y1 + r):
@@ -1020,13 +1204,14 @@ def audit_items(pcb_data, segments, vias, keepouts):
                 if getattr(s, 'graphic', False) or not _on_layer(ko['layers'], s.layer):
                     continue
                 if bound(ko, s.net_id) and hit(s.start_x, s.start_y, s.end_x, s.end_y,
-                                               s.width / 2):
+                                               s.width / 2 + gap):
                     yield ko, 'track', s
         if not ko.get('vias_allowed', True):
             for v in vias:
                 if not any(_on_layer(ko['layers'], l) for l in _via_layers(v, copper)):
                     continue
-                if bound(ko, v.net_id) and (inside(v.x, v.y) or near(v.x, v.y, v.size / 2)):
+                if bound(ko, v.net_id) and (inside(v.x, v.y)
+                                            or near(v.x, v.y, v.size / 2 + gap)):
                     yield ko, 'via', v
 
 
@@ -1049,10 +1234,11 @@ def via_site_filter(pcb_data, net_id: int, via_size: float, layers=None):
     if not kos:
         return None
     view = SimpleNamespace(nets={net_id: net}, board_info=pcb_data.board_info)
-    r = via_size / 2
-    boxes = [(min(p[0] for p in ko['polygon']) - r, min(p[1] for p in ko['polygon']) - r,
-              max(p[0] for p in ko['polygon']) + r, max(p[1] for p in ko['polygon']) + r)
-             for ko in kos]
+    boxes = []
+    for ko in kos:
+        r = via_size / 2 + float(ko.get('clearance') or 0.0)
+        boxes.append((min(p[0] for p in ko['polygon']) - r, min(p[1] for p in ko['polygon']) - r,
+                      max(p[0] for p in ko['polygon']) + r, max(p[1] for p in ko['polygon']) + r))
     vlayers = list(layers or ())
 
     def allowed(x, y):
@@ -1102,4 +1288,5 @@ def format_audit(found: List[dict], where: str) -> str:
     parts = '; '.join(f"{r['region']}: {r['net']} "
                       f"({r['tracks']} track(s), {r['vias']} via(s))" for r in found)
     return (f"WARNING: net-filtered keep-outs: {items} bound-net item(s) inside a "
-            f"region on {where} (KiCad reports them as items_not_allowed): {parts}")
+            f"region on {where} (KiCad reports them as items_not_allowed, or as "
+            f"clearance for a part's clearance rule): {parts}")

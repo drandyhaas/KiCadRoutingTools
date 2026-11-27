@@ -226,7 +226,11 @@ names two sides as comma-separated net patterns (resolved like `--nets`)
 and/or net classes as `class=NAME` (a glob; `!class=NAME` takes one out,
 `class=Default` is every net no class claims; a class never brings in an
 `unconnected-*` net), and a GAP in mm (at most 10), edge to edge on the same
-layer. Rules are separated by spaces, so a space inside a net or class name
+layer. An optional fourth field, `AGG:VICTIM:GAP:adjacent` (#2070), also
+prices the other side's copper on the copper layers next to the routed one in
+the board's stack (the stackup's copper order), in plan view -- copper on a
+layer the run does not route included -- for coupling to the next layer.
+Without it a rule sees the routed layer only. Rules are separated by spaces, so a space inside a net or class name
 is written `?` (`class=High?Speed`). `class=Digital:class=Audio:0.5` is KiCad's
 `A.NetClass == 'Digital' && B.NetClass == 'Audio'` as a soft rule; classes
 are read from the board's project by the resolver the router and `check_drc`
@@ -234,8 +238,12 @@ share. The run logs one line per rule with the number of nets each side
 resolved to, and a warning, once, for each pattern that matched nothing.
 While a net of either side is
 routed, every cell where its track would sit closer than GAP to the other
-side's copper (pads, tracks, vias -- pre-existing copper and copper routed
-earlier in the run alike) costs `keep_away_cost` on the **layer map**.
+side's copper (pads, tracks, vias, and pours -- pre-existing copper and
+copper routed earlier in the run alike) costs `keep_away_cost` on the
+**layer map**. A pour gives way to a track, so a pour's band is drawn from its
+zone OUTLINE (#2070): every cell inside the outline, or within GAP of it, on
+the zone's layer, less a cut-out's interior deeper than GAP; KiCad's
+generated teardrops are not pours and are left out.
 Nets of one side route against each other at the normal clearance, and a net
 matching both sides keeps away from both. The clearance stays the hard floor;
 the keep-away is soft, so a band the router cannot avoid is still routed
@@ -275,7 +283,16 @@ does not hand back a band the router kept clear.
 Because it is soft, the route step measures what shipped: per net of either
 group left inside a band, the track length inside it beyond the free radius,
 the closest spacing to the other side's copper and the net it came closest
-to, with board totals. The printed `JSON_SUMMARY['keep_away']` is the first
+to, with board totals. The other side's pours are measured on KiCad's refill
+of the shipped copper when the run already made one (the final re-grade's or
+the oracle's, memoized on the written file), else on the zone outlines, which
+the fill lies inside; `pour_measured_on` (`"kicad_refill"` or `"outline"`,
+present when a rule's net pours) says which, and no refill is ever run for the
+report alone. `not_measured` lists what the rules do not look at -- copper on
+other layers for a rule without `:adjacent`, copper two or more layers away for
+one with it -- and the log prints it as `not measured: ...` under the
+`Keep-away (...)` line, so `0 mm inside a band` is not read as clear on every
+layer. The printed `JSON_SUMMARY['keep_away']` is the first
 pass's reading; `route.py` measures again on the board it ships, after the
 plane finalize and the reconciliation, and that reading is the one
 `--json-out` carries (`measured_on`), the GUI's `results_data['keep_away']`
@@ -298,6 +315,10 @@ the brief in its outermost call only; its nested sub-runs inherit the merged
 rules. A board with no brief, or a brief without the key, routes exactly as
 before. `check_floorplan` grades the same rules on the placed pads, before any
 track exists (`keep_away` in [the floorplan intent](floorplan-intent.md)).
+`create_plane`'s via stitching reads the brief's rules the same way (#2066)
+and, having no cost search, holds them as a site gate
+(`keep_away.ViaBandGate`): a stitch or fence via inside a band is passed over
+for the next candidate (see [Plane Routing](route-plane.md)).
 `keep_away.unpriced_rules(rules, board_path)` answers the reverse question
 with the same reader: which of a list of rules the engines will NOT price on
 that board. check_floorplan asks it about the intent it grades and warns
@@ -649,7 +670,7 @@ on the corpus.
 | `board_edge_declared` | `None` | #1678: what `board_edge_clearance` was before a rule moved it, which the DRC writeback records |
 | `edge_extra_clearance` | `0.0` | #1678: what a map's edge band adds for geometry offset from the routed centreline (a diff pair's members, `net_keepouts.centerline_config`; per layer when the members' half-pitch differs by layer, #1729) |
 | `pour_barriers` | `[]` | #1260: the fill islands of out-of-scope zone nets this run could only cut, `[{net, layer, polygons, clearance}]`, installed by `pour_guard.install_pour_barriers` and stamped by `build_base_obstacle_map` as track and via keep-outs (see "Pour guard (#1260)" above). Engine-computed and inherited by nested sub-runs; no CLI flag and no GUI control (`KICAD_POUR_GUARD=0` reverts). Empty = inert |
-| `same_net_pad_clearance` | `-1.0` | #581: edge-to-edge clearance between **every placed via** and **same-net SMD pads**. `> 0` forbids via-in-pad globally (routing/tap/rescue via placement blocks same-net SMD pads at this clearance; pad-centre swap vias are declined; the #189 in-pad rescue is disabled; the sub-grid via nudge honors it; BGA under-pad escapes run dog-bone, QFN refuses via-in-pad). #962: `> 0` also keeps vias out of the net's solder-paste OPENINGS at the same clearance -- graphic and paste-only openings, and pad openings larger than their pad -- in the routing, plane-via, nudge and seal-hint paths (the fanouts keep their own via-in-pad rules). `-1` **and** `0` preserve pre-#581 behavior exactly (0 keeps only its legacy meaning where `route_planes` passes it explicitly into its stitching via maps). Set from `--same-net-pad-clearance` (planes/route/route_diff/fanout/repair) or auto-read from the persisted `.kicad_pro` record (`kicad_routing_tools.same_net_pad_clearance`); an active flag value is persisted so later chain steps inherit it |
+| `same_net_pad_clearance` | `-1.0` | #581: edge-to-edge clearance between **every placed via** and **same-net SMD pads**. `> 0` forbids via-in-pad globally (routing/tap/rescue via placement blocks same-net SMD pads at this clearance; pad-centre swap vias are declined; the #189 in-pad rescue is disabled; the sub-grid via nudge honors it; BGA under-pad escapes run dog-bone, QFN refuses via-in-pad). #962: `> 0` also keeps vias out of the net's solder-paste OPENINGS at the same clearance -- graphic and paste-only openings, and pad openings larger than their pad -- in the routing, plane-via, nudge and seal-hint paths (the fanouts keep their own via-in-pad rules). #2063: the plane step's thermal via array under an exposed pad is exempt from that one pad's keep-out, not from its paste openings or any other pad's keep-out. `-1` **and** `0` preserve pre-#581 behavior exactly (0 keeps only its legacy meaning where `route_planes` passes it explicitly into its stitching via maps). Set from `--same-net-pad-clearance` (planes/route/route_diff/fanout/repair) or auto-read from the persisted `.kicad_pro` record (`kicad_routing_tools.same_net_pad_clearance`); an active flag value is persisted so later chain steps inherit it |
 | `net_clearances` | `{}` | `{net_id: class_clearance_mm}` — per-net **net-class** clearance for KiCad's cross-class rule (see below) |
 | `net_clearance_floor` | `None` | Routing-side floor (max class clearance among the nets being routed this call); set by `set_net_clearances()` |
 | `layer_clearances` | `{}` | `{layer_name: mm}` — per-layer clearance from the board's `.kicad_dru` custom rules (#498). **Replacement** semantics, mirroring KiCad's precedence: on a ruled layer the value replaces the net/class-resolved pair clearance for every pair there (it may tighten *or* relax); unruled layers keep the normal resolution. Auto-read engine-side from the sibling `.kicad_dru` by **every routing step** — `batch_route`/`batch_route_diff_pairs`, plane create/repair, BGA/QFN fanout, oracle sub-routes (`kicad_dru.install_layer_clearances`, fab-floor pinned; path discovery via `PCBData.source_path` where the engine signature has no `input_file`) — there is deliberately **no CLI flag and no GUI control**; the rules file is the single source of truth and `check_drc`/staged kicad-cli grade from the same file. Resolve via `layer_clearance(layer, fallback)`; stack-spanning pairs (via barrels) use `stack_clearance(fallback)` = max over the rules and the fallback. Empty map = byte-identical to no rules |

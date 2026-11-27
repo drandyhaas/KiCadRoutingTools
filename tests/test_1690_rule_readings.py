@@ -967,9 +967,10 @@ class RuleReadings(unittest.TestCase):
             self.assertEqual([x['rule'] for x in json.load(fh)['kicad_refuses_file']], ['typo'])
 
     def test_route_says_both(self):
-        """`memberOfFootprint` in the JSON's unsupported_rules, and the file's finding."""
+        """A pad-number clearance rule in the JSON's unsupported_rules, and the
+        file's finding. (A `memberOfFootprint` one is routed to since #2071.)"""
         path = self._route_board('rt', "(version 1)\n"
-                                 "(rule \"pads\" (condition \"A.memberOfFootprint('J3')\") "
+                                 "(rule \"pads\" (condition \"A.Pad_Number == '1'\") "
                                  "(constraint clearance (min 0.1mm)))\n"
                                  "(rule \"typo\" (condition \"A.onLayer('F.Cu')\") "
                                  "(constraint track_width (min 0.2mm)))\n")
@@ -979,7 +980,7 @@ class RuleReadings(unittest.TestCase):
                            timeout=600)
         self.assertNotIn('Traceback', r.stdout + r.stderr)
         self.assertIn('KiCad ENFORCES NO RULE OF THIS FILE', r.stdout)
-        self.assertIn("rule 'pads': NOT honoured (clearance scoped by A.memberOfFootprint()", r.stdout)
+        self.assertIn("rule 'pads': NOT honoured (clearance scoped by A.Pad_Number", r.stdout)
         rows = [ln for ln in r.stdout.splitlines() if ln.startswith('JSON_SUMMARY:')]
         self.assertTrue(rows, r.stdout[-400:])
         block = json.loads(rows[-1].split(':', 1)[1])['design_rules']

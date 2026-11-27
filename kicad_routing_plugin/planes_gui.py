@@ -1601,8 +1601,11 @@ class PlanesTab(wx.Panel):
                 # #962: the engine stamped Type VII onto a via it put in a pad
                 # or paste opening, and a re-placed via carries its own spec.
                 # This tab applied NEITHER before (every other tab did).
-                from .gui_utils import apply_via_protection
+                from .gui_utils import apply_via_protection, apply_via_free
                 apply_via_protection(via, via_data.get('tenting_attrs'))
+                # #2067: a stitching/fence/GND-return via is free, as the
+                # CLI writes it.
+                apply_via_free(via, via_data.get('free'))
                 board.Add(via)
                 vias_added += 1
             self._new_vias = []
