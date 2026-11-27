@@ -49,10 +49,21 @@ def run_one(path, timeout, log_path):
         try:
             rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                proc.kill()
+            if os.name == 'nt':
+                # no os.killpg / SIGKILL on Windows: end the gate's process tree
+                try:
+                    ok = subprocess.run(['taskkill', '/T', '/F', '/PID', str(proc.pid)],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        timeout=30).returncode == 0
+                except (OSError, subprocess.TimeoutExpired):
+                    ok = False
+                if not ok:
+                    proc.kill()
+            else:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    proc.kill()
             proc.wait()
             rc = None
     return rc, time.monotonic() - t0
