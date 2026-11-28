@@ -1934,9 +1934,17 @@ def _repair_planes_all(
                 _pr_phase = ""
                 while _pad_queue or _deferred_rip:
                     if not _pad_queue:
+                        # The threshold is tuned on rip pressure, so count
+                        # only deferred pads that will rip: one a phase-1 tap
+                        # already joined to the plane is skipped below with
+                        # no rip (same condition as that skip).
+                        _rip_pending = sum(
+                            1 for p, _ in _deferred_rip
+                            if plane_oracle.inert
+                            or not plane_oracle.pad_on_plane(p))
                         _phase2_immediate = _PLANE_IMMEDIATE_RECONNECT or (
                             _PLANE_ADAPTIVE_RECONNECT
-                            and len(_deferred_rip)
+                            and _rip_pending
                             <= _PLANE_IMMEDIATE_MAX_PENDING)
                         _mode_note = ""
                         if _PLANE_ADAPTIVE_RECONNECT:
@@ -1944,7 +1952,7 @@ def _repair_planes_all(
                                           if _phase2_immediate else
                                           " [adaptive: deferred to end batch]")
                         print(f"    (#517 ordering: phase 2 -- "
-                              f"{len(_deferred_rip)} rip-requiring pad(s)"
+                              f"{_rip_pending} rip-requiring pad(s)"
                               f"{_mode_note})")
                         _pad_queue = [(p, l, True) for (p, l) in _deferred_rip]
                         _deferred_rip = []
@@ -1957,6 +1965,20 @@ def _repair_planes_all(
                         print("    (cancelled)")
                         break
                     _tapped_pads.append(pad)
+                    # The queue was built before any tap of this pass; a tap
+                    # since may have joined this pad to the plane through the
+                    # copper it already had (note_tap_committed folds the
+                    # tapped pad's component into main). Tapping it again only
+                    # adds a redundant strap or via. It stays in _tapped_pads:
+                    # its connection rests on that earlier tap's copper, which
+                    # the graze cleanup must protect the same way. An inert
+                    # oracle answers True for every pad, so it never skips.
+                    if not plane_oracle.inert and plane_oracle.pad_on_plane(pad):
+                        total_pads_repaired += 1
+                        print(f"    Pad {pad.component_ref}.{pad.pad_number} "
+                              f"({pad_layer})... already reaches the plane "
+                              f"through an earlier tap (skipped)", flush=True)
+                        continue
                     if progress_callback:
                         progress_callback(_pr_idx + 1, _pr_total,
                                           f"{net_name}: pad repair{_pr_phase} "

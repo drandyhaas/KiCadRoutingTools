@@ -786,7 +786,10 @@ at the loosest clearance that routes — there is no hard-coded "fine clearance"
 (issue #226). The clearance it actually used is recorded into the output
 `.kicad_pro` DRC floor and `JSON_SUMMARY` (`min_clearance_used`) so `check_drc`
 grades the board at it. Obstacle maps for each retry are built on a small window
-around the pad, so fine grids stay cheap on large boards. Per-pad outcomes are printed, and pads that still fail are listed in
+around the pad, so fine grids stay cheap on large boards. A queued pad that an
+earlier tap of the same pass already joined to the plane (through copper the
+two pads share, such as a locked track) is skipped rather than tapped again.
+Per-pad outcomes are printed, and pads that still fail are listed in
 the summary. Use `--no-repair-pads` to only reconnect zone islands.
 
 The standalone script then grades the plane nets on the board it wrote (after

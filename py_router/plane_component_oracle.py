@@ -17,8 +17,10 @@ outline-permissive zone credit), identifies the MAIN plane component -- the
 zone-credited component holding the most pads (falling back to the most-pad
 component when no zone is credited) -- and answers "is this copper on the main
 plane?" for tap-target filtering. It is updated incrementally as verified taps
-commit (note_tap_committed), so copper a verified tap just placed is a valid
-target for the next pad (transitive credit) without rebuilding the graph.
+commit (note_tap_committed), so copper a verified tap just placed -- and the
+copper the tapped pad already had, the rest of its own component -- is a valid
+target for the next pad (transitive credit) without rebuilding the graph. A
+queued pad that component held is then already on the plane.
 
 Because "main" here is exactly "connected to the main component" there, a tap
 the oracle accepts is one the grader will credit: honest failure beats false
@@ -91,6 +93,11 @@ class PlaneComponentOracle:
         self._main_segments: List = []
         self._main_zones: List = []
         self._all_zones: List = zones
+        # Non-main components, so a verified tap can fold its pad's whole
+        # component into main: root -> ([pads], [via keys], [segments]), and
+        # pad key -> root for each non-main pad.
+        self._other_components = {}
+        self._other_pad_root = {}
         self.n_floating_items = 0
         if self.inert:
             return
@@ -138,25 +145,36 @@ class PlaneComponentOracle:
             return
         main_root = max(candidates, key=lambda r: pad_count.get(r, 0))
 
+        def other(root):
+            return self._other_components.setdefault(root, ([], [], []))
+
         for via_idx in sorted(via_repr):
-            if uf.find(via_repr[via_idx]) == main_root:
-                v = vias[via_idx]
+            v = vias[via_idx]
+            r = uf.find(via_repr[via_idx])
+            if r == main_root:
                 self._main_via_keys.add(_pt_key(v.x, v.y))
             else:
                 self.n_floating_items += 1
+                other(r)[1].append(_pt_key(v.x, v.y))
         for pad_idx in sorted(pad_repr):
-            if uf.find(pad_repr[pad_idx]) == main_root:
-                p = pads[pad_idx]
+            p = pads[pad_idx]
+            r = uf.find(pad_repr[pad_idx])
+            if r == main_root:
                 self._main_pad_keys.add(_pad_key(p))
                 self._main_pads.append(p)
+            else:
+                self._other_pad_root[_pad_key(p)] = r
+                other(r)[0].append(p)
         for i, s in enumerate(segments):
             # Segment i's endpoints are point ids 2i/2i+1 (see the graph note
             # in check_net_connectivity); both are unioned, either works.
-            if uf.find(2 * i) == main_root:
+            r = uf.find(2 * i)
+            if r == main_root:
                 self._main_seg_keys.add(_seg_key(s))
                 self._main_segments.append(s)
             else:
                 self.n_floating_items += 1
+                other(r)[2].append(s)
         for zone_idx in sorted(zone_repr):
             if uf.find(zone_repr[zone_idx]) == main_root:
                 self._main_zones.append(zones[zone_idx])
@@ -242,13 +260,23 @@ class PlaneComponentOracle:
                            new_segments: Iterable = ()) -> None:
         """Register a VERIFIED tap's pad and copper as main-connected, so later
         taps may target them (transitive credit) without a graph rebuild.
+        The pad's own pre-existing component (pads, vias, segments it already
+        reached, e.g. through locked copper) joins main with it, so a queued
+        pad of that component reads pad_on_plane() True from here on.
         new_vias accepts Via objects or tap dicts ({'x','y',...}); new_segments
         accepts Segment objects or tap dicts ({'start','end','width','layer'})."""
         if self.inert:
             return
-        if pad is not None and _pad_key(pad) not in self._main_pad_keys:
-            self._main_pad_keys.add(_pad_key(pad))
-            self._main_pads.append(pad)
+        if pad is not None:
+            self._add_main_pad(pad)
+            root = self._other_pad_root.get(_pad_key(pad))
+            comp_pads, comp_vias, comp_segs = self._other_components.pop(
+                root, ((), (), ()))
+            for p in comp_pads:
+                self._add_main_pad(p)
+            self._main_via_keys.update(comp_vias)
+            for s in comp_segs:
+                self._add_main_segment(s)
         for v in new_vias or ():
             if isinstance(v, dict):
                 self._main_via_keys.add(_pt_key(v['x'], v['y']))
@@ -261,7 +289,15 @@ class PlaneComponentOracle:
                             end_x=s['end'][0], end_y=s['end'][1],
                             width=s['width'], layer=s['layer'],
                             net_id=self.net_id)
-            k = _seg_key(s)
-            if k not in self._main_seg_keys:
-                self._main_seg_keys.add(k)
-                self._main_segments.append(s)
+            self._add_main_segment(s)
+
+    def _add_main_pad(self, pad) -> None:
+        if _pad_key(pad) not in self._main_pad_keys:
+            self._main_pad_keys.add(_pad_key(pad))
+            self._main_pads.append(pad)
+
+    def _add_main_segment(self, seg) -> None:
+        k = _seg_key(seg)
+        if k not in self._main_seg_keys:
+            self._main_seg_keys.add(k)
+            self._main_segments.append(seg)
