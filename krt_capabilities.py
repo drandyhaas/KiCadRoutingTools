@@ -82,8 +82,9 @@ KNOWN_MODULES = (
     'fill_for_delivery.py',
     'render_placement.py', 'list_nets.py', 'route_summary.py',
     # After a first route: what to move (open and costly nets, congested
-    # areas), and the routed nets drawn side by side.
-    'route_review.py', 'render_nets.py',
+    # areas), how well the signals are routed, and the routed nets drawn
+    # side by side.
+    'route_review.py', 'signal_review.py', 'render_nets.py',
     # #891. The per-part context sheet a model reasons from -- body and
     # its source, pads by board face, pin-order agreement, partners. An
     # instrument nobody can discover produces no findings.

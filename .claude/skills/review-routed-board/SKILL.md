@@ -327,6 +327,15 @@ from net_queries import diff_pair_copper
 rec = diff_pair_copper(pcb, p_id, n_id)   # coupled_mm, uncoupled_mm, skew_mm, layers_p/_n
 ```
 
+`py_tools/signal_review.py` reads the same coupling for every pair route_diff
+pairs, and also lists signal nets past 1.5x their pad tree or 2 vias, vias in
+SMD pads, and net names that read as a pair but that route_diff or KiCad does
+not pair, with the rename that pairs them:
+
+```bash
+python3 -X utf8 py_tools/signal_review.py board.kicad_pcb --nets 'USB*' 'QSPI*' --json signal.json
+```
+
 - **Coupling**: a pair the plan routed coupled must show coupled copper. In a
   route_diff log, `JSON_SUMMARY.uncoupled_diff_pairs` (outcome `uncoupled`)
   lists pairs routed whose shipped copper is not coupled (a coupled run under

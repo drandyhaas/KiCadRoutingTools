@@ -61,7 +61,8 @@ from net_queries import (
     find_differential_pairs, get_all_unrouted_net_ids, get_chip_pad_positions,
     compute_mps_net_ordering, find_pad_nearest_to_position,
     expand_net_patterns, matches_diff_pair_patterns,
-    resolve_gnd_net_id, gnd_candidate_names, filter_routable_nets
+    resolve_gnd_net_id, gnd_candidate_names, filter_routable_nets,
+    near_miss_diff_pairs, near_miss_text
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
@@ -1592,6 +1593,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Find differential pairs from all provided nets
     diff_pairs: Dict[str, DiffPairNet] = find_differential_pairs(pcb_data, net_names)
     diff_pair_net_ids = set()  # Net IDs that are part of differential pairs
+
+    # A selected net whose name reads as half of a pair the suffix rules do
+    # not pair is left out below; name the pair and the rename that pairs it.
+    for miss in near_miss_diff_pairs([n.name for n in pcb_data.nets.values()]):
+        if not miss['route_diff'] and any(
+                matches_diff_pair_patterns(miss[k], miss[k], net_names) for k in ('p', 'n')):
+            print(f"WARNING: {near_miss_text(miss)}")
 
     # Detect AC-coupled XNets (#196): differential pairs split into two base-named
     # pairs by series DC-blocking caps, to be length-matched END-TO-END after
