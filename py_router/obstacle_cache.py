@@ -1295,8 +1295,12 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
         return groups
 
     def _via_clr(expanded):
-        return max((_layer_clr(l) for l in expanded if l.endswith('.Cu')),
-                   default=config.pad_override_clearance(clearance, pad))
+        # a via's DRILL keeps the board's copper-to-hole floor off the pad
+        # too (obstacle_map._via_hole_copper_floor), as _add_pad_obstacle's
+        from obstacle_map import _via_hole_copper_floor
+        return max(max((_layer_clr(l) for l in expanded if l.endswith('.Cu')),
+                       default=config.pad_override_clearance(clearance, pad)),
+                   _via_hole_copper_floor(config))
 
     clearance = config.pad_override_clearance(clearance, pad)
 

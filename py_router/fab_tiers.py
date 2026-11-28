@@ -317,6 +317,23 @@ def get_escalation_policy():
     return (_ESCALATION, floors)
 
 
+def rules_are_promised():
+    """True under ``--escalation off``: the run promised the input board's
+    declared rules. The DRC writeback still records what the RUN asked for
+    (an explicit ``--clearance``, ``--clearance-ceiling``, ``--track-width``,
+    via size) and the copper it added, but never lowers a floor to an object
+    the input already held below it (``fix_kicad_drc_settings.RunMinima``)."""
+    return _ESCALATION == 'off'
+
+
+def routes_to_graded_rules():
+    """True when the router must route to the rules KiCad grades the INPUT
+    board at -- the declared rule, else KiCad's factory value -- because no
+    writeback will lower them to what was routed (``--no-fix-drc-settings``)
+    or the run promised them (``--escalation off``)."""
+    return (not project_writeback()) or rules_are_promised()
+
+
 def project_writeback():
     """True when this run's DRC-floor writeback will run (the default), False
     under ``--no-fix-drc-settings`` or the GUI's box unticked (#1775)."""
@@ -2008,7 +2025,9 @@ def add_fab_tier_args(parser, *, include_escalation=True):
                  f"(default {DEFAULT_ESCALATION}). 'off': never -- sizes and clearances are exact, "
                  "a net that cannot complete at them fails and is reported (a wide "
                  "power/impedance net may still neck for at most "
-                 f"{defaults.PAD_ENTRY_NECK_MM:g} mm of path at a pad entry). 'board': "
+                 f"{defaults.PAD_ENTRY_NECK_MM:g} mm of path at a pad entry), and the "
+                 "DRC writeback never lowers a declared rule to an object the "
+                 "input already held below it. 'board': "
                  "down to the board's own declared floors (Board Setup rules.min_*; "
                  "an unset key falls back to the fab tier floor, an unset "
                  "min_clearance to the Default class). That is what KiCad's DRC "

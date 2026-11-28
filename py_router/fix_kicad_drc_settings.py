@@ -566,8 +566,67 @@ def effective_board_edge_clearance(pcb_path: str, cli_value: float,
     way it is pinned UP to the fab floor (#441) unless ``fab_floor`` is False, so a
     board declaring a sub-fab (or 0) edge rule is never routed/graded with copper
     against the milled edge (80/184 corpus boards declare < 0.20 mm)."""
-    base = cli_value if (cli_value and cli_value > 0) else read_project_edge_clearance(pcb_path)
+    if cli_value and cli_value > 0:
+        base = cli_value
+    else:
+        base = read_project_edge_clearance(pcb_path)
+    # A run that writes no project ships the board graded at the rule it
+    # declares, else KiCad's factory value: its copper meets that rule.
+    base = max(base, _graded_edge_clearance(pcb_path))
     return max(base, fab_edge_floor(pcb_path)) if fab_floor else base
+
+
+def _declared_edge_rule(pcb_path: str):
+    """The project's ``rules.min_copper_edge_clearance`` as declared: a
+    float (0.0 for a declared 0, "no check"), or None when the project
+    leaves it out or there is no project."""
+    pro = find_project(pcb_path)
+    if not os.path.isfile(pro):
+        return None
+    with open(pro) as f:
+        rules = ((json.load(f).get('board') or {}).get('design_settings')
+                 or {}).get('rules') or {}
+    if 'min_copper_edge_clearance' not in rules:
+        return None
+    v = rules.get('min_copper_edge_clearance')
+    return float(v) if isinstance(v, (int, float)) and v > 0 else 0.0
+
+
+def _graded_edge_clearance(pcb_path: str) -> float:
+    """What KiCad grades the INPUT board's copper-to-edge at, when the run
+    must route to it (fab_tiers.routes_to_graded_rules: --no-fix-drc-settings
+    writes no project, --escalation off promised the input's rules): the
+    project's declared rule, else (left out, or no project) KiCad's factory
+    value (fab_tiers.KICAD_FACTORY_RULES, #1287). 0.0 otherwise (the writeback
+    records the routed floor) or when the project declares the rule 0 (no
+    check)."""
+    try:
+        import fab_tiers
+        if not fab_tiers.routes_to_graded_rules():
+            return 0.0
+        declared = _declared_edge_rule(pcb_path)
+        if declared is not None:
+            return declared
+        return float(fab_tiers.KICAD_FACTORY_RULES.get('min_copper_edge_clearance') or 0.0)
+    except Exception:                                          # noqa: BLE001
+        return 0.0
+
+
+def edge_clearance_source(pcb_path: str) -> str:
+    """Where the copper-to-edge value that
+    :func:`effective_board_edge_clearance` raised the run to comes from, for
+    the console line that announces it: KiCad's factory value when the run
+    routes to the graded rules (fab_tiers.routes_to_graded_rules) and the
+    project declares no rule, else the project's rule."""
+    try:
+        import fab_tiers
+        if (fab_tiers.routes_to_graded_rules()
+                and _declared_edge_rule(pcb_path) is None):
+            return ("KiCad's factory min_copper_edge_clearance: the project "
+                    "declares none")
+    except Exception:                                          # noqa: BLE001
+        pass
+    return "project min_copper_edge_clearance"
 
 
 # Rules that describe what the FAB can make, as opposed to how the board is
@@ -1473,6 +1532,45 @@ def scan_board_minima(pcb_path: str):
     return out
 
 
+class RunMinima(dict):
+    """:func:`scan_board_minima`'s keys over the objects THIS run added
+    (:func:`run_added_minima`). Under ``--escalation off``
+    :func:`compute_targets` takes only these, so a declared rule is never
+    lowered to an object the input already held below it."""
+
+
+def run_added_minima(output_pcb: str, input_pcb=None) -> "RunMinima":
+    """The smallest of each :func:`board_size_values` key over the objects
+    on ``output_pcb`` that ``input_pcb`` did not hold: per key, the output's
+    values less the input's as multisets (a kept track, a footprint's pad
+    drill cancel out). The #530 pad-override cap is the output's own (the
+    run routed at the override). No readable input: nothing is the run's
+    but that cap."""
+    from collections import Counter
+    out = RunMinima()
+    try:
+        from kicad_parser import parse_kicad_pcb
+        pcb = parse_kicad_pcb(output_pcb)
+    except Exception:                                        # noqa: BLE001
+        return out
+    ovr = pad_clearance_override_minimum(pcb)
+    if ovr is not None:
+        out["min_pad_clearance_override"] = ovr
+    if not input_pcb or not os.path.isfile(input_pcb) \
+            or os.path.abspath(input_pcb) == os.path.abspath(output_pcb):
+        return out
+    try:
+        before = board_size_values(parse_kicad_pcb(input_pcb))
+    except Exception:                                        # noqa: BLE001
+        return out
+    for key, vals in board_size_values(pcb).items():
+        added = Counter(round(v, 6) for v in vals) \
+            - Counter(round(v, 6) for v in before.get(key) or ())
+        if added:
+            out[key] = min(added)
+    return out
+
+
 def pad_clearance_override_minimum(pcb):
     """#530: the smallest pad / footprint clearance OVERRIDE on the board's
     copper pads, or None. KiCad floors an override at rules.min_clearance
@@ -1543,6 +1641,13 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
     ``_RULE_KEYS`` is what keeps it out of the project's rule map; read it with
     :func:`_class_clearance`."""
     minima = minima or {}
+    if _rules_are_promised() and not isinstance(minima, RunMinima):
+        # --escalation off: a scan of the whole board holds the input's own
+        # objects, which must not lower a declared rule. Only the #530
+        # pad-override cap stays (the run routed at the override); the
+        # floors follow the explicit sizes this run asked for.
+        minima = RunMinima({k: v for k, v in minima.items()
+                            if k == "min_pad_clearance_override"})
     targets = {}
     if clearance is not None:
         targets["min_clearance"] = clearance
@@ -3174,6 +3279,50 @@ def apply_fix_to_board(board, *, minima, clearance=None, hole_clearance=None,
                                   class_ceiling=class_ceiling)
 
 
+def _rules_are_promised() -> bool:
+    """True under ``--escalation off`` (fab_tiers.rules_are_promised): the
+    writeback lowers no floor to an object the input already held below it."""
+    try:
+        from fab_tiers import rules_are_promised
+        return rules_are_promised()
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+def report_below_project_rules(pcb_path: str, verbose: bool = True) -> dict:
+    """The objects of the board at ``pcb_path`` below the size floors its
+    project declares (Board Setup, or the authored .kicad_dru rule that binds
+    the object -- :func:`size_values_below_authored`), printed when
+    ``verbose``. Under ``--escalation off`` the router's own copper is never
+    below them, so these come from the input (a footprint's pad drill, a
+    track the run kept): the writeback does not lower the project to hide
+    them (:class:`RunMinima`), and KiCad's DRC reports each. Returns ``{key: {'count', 'smallest', 'floor'}}``."""
+    try:
+        import tool_records
+        rules = _effective_rules(tool_records.load_project(find_project(pcb_path)))
+    except Exception:                                        # noqa: BLE001
+        return {}
+    floors = {k: rules[k] for k in _RULE_KIND
+              if isinstance(rules.get(k), (int, float)) and rules[k] > 0}
+    out = {}
+    for key, r in size_values_below_authored(pcb_path, floors, pcb_path).items():
+        if r.get("below"):
+            out[key] = {"count": len(r["below"]), "smallest": min(r["below"]),
+                        "floor": floors[key]}
+    if verbose:
+        if out:
+            print("  --escalation off: no declared rule is lowered to the input's "
+                  "own objects; the board holds object(s) below them (KiCad's "
+                  "DRC reports each -- fix the board or the rule):")
+            for key, r in sorted(out.items()):
+                print(f"      rules.{key} {r['floor']:g} mm: {r['count']} "
+                      f"object(s) below, smallest {r['smallest']:g} mm")
+        else:
+            print("  --escalation off: no declared rule is lowered to the input's "
+                  "own objects; nothing on the board is below their size floors")
+    return out
+
+
 def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            hole_clearance=None, hole_to_hole=None, edge_clearance=None,
                            track_width=None, via_diameter=None, via_drill=None,
@@ -3222,6 +3371,13 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     # seeded them (seed_project_for_output); this covers a caller that did not
     # write the board through one.
     carry_input_siblings(output_pcb, input_pcb, skip=(".kicad_pro",))
+    # --escalation off: the floors follow what the RUN asked for and the
+    # copper it added, never an object the input already held below a
+    # declared rule (an input pad drill under the hole floor): those are
+    # reported at the end, and KiCad's DRC flags them.
+    _promised = _rules_are_promised()
+    if _promised and minima is None:
+        minima = run_added_minima(output_pcb, input_pcb)
 
     # The records (origin, protected nets, ...) as the board holds them: the
     # newer of the project's copy and the board file's, which is where a GUI
@@ -3387,6 +3543,8 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
             for line in _fab_floor_disclosure(output_pcb, _banner_before, proj,
                                               _origin) + _ccr_lines:
                 print(line)
+        if _promised and verbose:
+            report_below_project_rules(output_pcb)
         return out_pro
     # Atomic replace (#513 item 12): a kill mid-dump must not leave a
     # truncated/unparseable project stranding the DRC floor.
@@ -3415,6 +3573,8 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     for line in _fab_floor_disclosure(output_pcb, _banner_before, proj,
                                       _origin) + _ccr_lines:
         print(line)
+    if _promised and verbose:
+        report_below_project_rules(output_pcb)
     return out_pro
 
 

@@ -897,11 +897,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # replays inherit it; see batch_route).
     if input_file:
         try:
-            from fix_kicad_drc_settings import effective_board_edge_clearance
+            from fix_kicad_drc_settings import (effective_board_edge_clearance,
+                                                edge_clearance_source)
             _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
             if _eff_edge > (board_edge_clearance or 0.0):
                 print(f"Board edge clearance {_eff_edge}mm "
-                      f"(project min_copper_edge_clearance)")
+                      f"({edge_clearance_source(input_file)})")
                 board_edge_clearance = _eff_edge
         except Exception:
             pass
@@ -1577,6 +1578,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         config_kwargs['via_span_type'] = _span_type1842
     config = GridRouteConfig(**config_kwargs)
     config.quick = int(quick or 0)
+    # the copper-to-hole floor KiCad grades a via's drill at when the run
+    # writes no project (--escalation off), as batch_route installs it
+    try:
+        from obstacle_map import graded_via_hole_clearance
+        config.via_hole_clearance = graded_via_hole_clearance(pcb_data, input_file)
+    except Exception:                                          # noqa: BLE001
+        pass
     # #1293: every P<->N pricing site (the #318 neck, via spacing, the
     # self-checks) reads the coupled-pair rule through pair_clearance.
     config.coupled_pair_clearances = _coupled_map
@@ -4267,6 +4275,15 @@ Examples:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+    elif _wrote_output and getattr(args, 'escalation', None) == 'off':
+        # --escalation off with the writeback off: name what on the board
+        # sits below its declared rules (input copper -- the router's never
+        # does; with the writeback on, fix_project_for_output names them).
+        try:
+            from fix_kicad_drc_settings import report_below_project_rules
+            report_below_project_rules(args.output_file)
+        except Exception as e:                               # noqa: BLE001
+            print(f"  (skipped the below-rule report: {e})")
     if _wrote_output:
         # #521: record this step's protection-worthy nets (routed diff pairs,
         # matched groups) and impedance declarations in the output project so

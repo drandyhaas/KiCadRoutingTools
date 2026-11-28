@@ -1279,6 +1279,19 @@ def try_tap_pad(
     from route_planes import (find_via_position, route_via_to_pad,
                               route_multi_source_to_pad)
 
+    # The tap trace runs on ``pad_layer`` at config.track_width, a scalar the
+    # caller (or a fine rung) chose layer-blind. A .kicad_dru width rule is
+    # per layer (0.18 outside, 0.102 inside): clamp the scalar into the pad
+    # layer's window BEFORE the search, so the A* clearance matches the drawn
+    # width. No rules: unchanged.
+    if pad_layer:
+        try:
+            _tw = config.rule_width_bounds(net_id, pad_layer, config.track_width)
+        except Exception:                                      # noqa: BLE001
+            _tw = config.track_width
+        if abs(_tw - config.track_width) > 1e-9:
+            config = replace(config, track_width=_tw)
+
     def _gate(res: TapResult) -> TapResult:
         """T6 oracle-strict terminal rung: a success the oracle cannot tie to
         the main plane component becomes an honest failure (the caller falls

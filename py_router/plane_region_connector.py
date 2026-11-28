@@ -1939,6 +1939,22 @@ def _calculate_clearance(
 from terminal_colors import GREEN, RED, YELLOW, RESET
 
 
+def join_width_ladder(min_w: float, max_w: float,
+                      base: Optional[float] = None) -> List[float]:
+    """The widths a region join tries, narrowest first: ``min_w``, then
+    base*2, base*4, ... above ``min_w`` up to ``max_w``, then ``max_w``.
+    ``base`` None is ``min_w`` (min, 2min, 4min, ...)."""
+    widths = [min_w]
+    w = (base or min_w) * 2
+    while w <= max_w:
+        if w > min_w + 1e-9:
+            widths.append(w)
+        w = w * 2
+    if widths[-1] < max_w:
+        widths.append(max_w)
+    return widths
+
+
 def _try_route_between_regions(
     anchors_i: List[Tuple[float, float]],
     anchors_j: List[Tuple[float, float]],
@@ -1958,6 +1974,8 @@ def _try_route_between_regions(
     net_id: Optional[int] = None,
     open_ok_i=None,
     open_ok_j=None,
+    widen_obstacles: Optional[GridObstacleMap] = None,
+    widen_map_width: Optional[float] = None,
 ) -> Tuple[Optional[Tuple[List[Tuple[float, float, str]], List[Tuple[float, float]]]], float, Optional[Tuple[float, float]]]:
     """
     Try to route between two regions, attempting multiple track widths.
@@ -1983,6 +2001,13 @@ def _try_route_between_regions(
             so a fallback seed can only be a point the join's endpoint
             verification would accept as that region's material. Omitted
             (None) restores the pre-fix behavior of seeding any open cell.
+        widen_obstacles / widen_map_width: a map stamped at a width below
+            min_track_width (a caller that raised the min, e.g. --escalation
+            off), and that width. The min-width route uses base_obstacles;
+            the widening steps use this map, with margins from its width,
+            and that width's doublings -- the steps a run starting at it
+            tries -- so a raised min never ends a join narrower than that
+            run would. None = widen on base_obstacles, as before.
 
     Returns:
         Tuple of (route_result, track_width_used, open_space_via_if_used)
@@ -2025,7 +2050,7 @@ def _try_route_between_regions(
             out.append(pt)
         return out
 
-    def _try_route(src, tgt, margin, iters, label):
+    def _try_route(src, tgt, margin, iters, label, obstacles=None):
         """Helper to attempt one route and track stats."""
         nonlocal _attempt_count, _total_route_time
         _t0 = _time.time()
@@ -2033,7 +2058,8 @@ def _try_route_between_regions(
             _lift(src), _lift(tgt),
             plane_layer_idx=plane_layer_idx,
             routing_layers=routing_layers,
-            base_obstacles=base_obstacles,
+            base_obstacles=(base_obstacles if obstacles is None
+                            else obstacles),
             config=config,
             net_vias=net_vias,
             track_margin=margin,
@@ -2053,14 +2079,12 @@ def _try_route_between_regions(
     if not anchors_i or not anchors_j:
         return None, min_track_width, None, False
 
-    # Generate width steps: min, min*2, min*4, ..., up to max
-    track_widths_narrow_first = [min_track_width]
-    w = min_track_width * 2
-    while w <= max_track_width:
-        track_widths_narrow_first.append(w)
-        w = w * 2
-    if track_widths_narrow_first[-1] < max_track_width:
-        track_widths_narrow_first.append(max_track_width)
+    if widen_obstacles is not None and widen_map_width:
+        wide_map, wide_map_w = widen_obstacles, widen_map_width
+    else:
+        wide_map, wide_map_w = base_obstacles, min_track_width
+    track_widths_narrow_first = join_width_ladder(
+        min_track_width, max_track_width, wide_map_w)
 
     result = None
     track_width = min_track_width
@@ -2149,16 +2173,16 @@ def _try_route_between_regions(
             # is the real gate, so the bigger margin only refused good
             # corridors (sechzig: identical DRC, 2.0mm trunks 9 -> 4).
             track_margin = 1.0 + _track_margin_for_width(
-                try_width, min_track_width, config.grid_step)
+                try_width, wide_map_w, config.grid_step)
 
             wider, _ = _try_route(
                 lo_src, hi_tgt, track_margin, iter_budget,
-                f"w={try_width:.2f}mm few->many")
+                f"w={try_width:.2f}mm few->many", wide_map)
 
             if wider is None:
                 wider, _ = _try_route(
                     hi_tgt, lo_src, track_margin, iter_budget,
-                    f"w={try_width:.2f}mm many->few")
+                    f"w={try_width:.2f}mm many->few", wide_map)
 
             if wider is not None:
                 # Seed cells are exemption-cleared (clone_fresh), so the
@@ -2223,7 +2247,9 @@ def route_disconnected_regions(
     zone_clearances: Optional[Dict[str, float]] = None,
     progress_callback=None,
     cancel_check=None,
-    split_report: bool = True
+    split_report: bool = True,
+    narrow_track_width: Optional[float] = None,
+    widen_map_width: Optional[float] = None
 ) -> Tuple[List[Dict], List[Dict], int, List[List[Tuple[float, float]]], List[Tuple[List[Tuple[float, float]], str]]]:
     """
     Detect and route between disconnected zone regions.
@@ -2254,6 +2280,14 @@ def route_disconnected_regions(
             dropped-island, #611 kept-island). Used by the per-layer
             follow-up joins so the banners the primary call already printed
             are not repeated; the tallies are still recorded.
+        narrow_track_width: The width of the last-resort narrow bridge
+            (#217), tried when no join fits at min_track_width. None = the
+            run's --track-width (config.track_width).
+        widen_map_width: The run's own minimum join width, when the caller
+            raised min_track_width above it. The joins then widen on a map
+            stamped at this width (built lazily, like the narrow map), with
+            its doublings, as a run starting at it would. None = widen on
+            base_obstacles from min_track_width, as before.
 
     Returns:
         Tuple of (list of segment dicts, list of via dicts, number of routes added,
@@ -2651,8 +2685,33 @@ def route_disconnected_regions(
     previous_routes: List[List[Tuple[float, float]]] = []
 
     # Create a single reusable router for all MST edges
-    narrow_obstacles = None       # lazily-built map stamped at config.track_width
+    if narrow_track_width is None:
+        narrow_track_width = config.track_width
+    narrow_obstacles = None       # lazily-built map stamped at narrow_track_width
     routes_added_replay = []      # connections added this loop, replayed onto it
+    if widen_map_width is not None and widen_map_width >= min_track_width - 1e-9:
+        widen_map_width = None
+    widen_obstacles = None
+
+    def _widen_map():
+        nonlocal widen_obstacles
+        if widen_map_width is None:
+            return None
+        if widen_obstacles is None:
+            widen_obstacles, _ = build_base_obstacles(
+                exclude_net_ids={net_id},
+                routing_layers=routing_layers,
+                pcb_data=pcb_data,
+                config=config,
+                track_width=widen_map_width,
+                track_via_clearance=track_via_clearance,
+                hole_to_hole_clearance=hole_to_hole_clearance)
+            for (_rp, _vp, _tw) in routes_added_replay:
+                add_route_to_obstacles(
+                    widen_obstacles, _rp, _vp, layer_map, _tw,
+                    config.clearance, track_via_clearance, config,
+                    hole_to_hole_clearance)
+        return widen_obstacles
     plane_router = GridRouter(
         via_cost=config.via_cost_units(),
         h_weight=config.heuristic_weight,
@@ -2766,6 +2825,8 @@ def route_disconnected_regions(
                 net_vias=net_vias,
                 max_track_width=max_track_width,
                 min_track_width=min_track_width,
+                widen_obstacles=_widen_map(),
+                widen_map_width=widen_map_width,
                 max_iterations=max_iterations,
                 coord=coord,
                 verbose=verbose,
@@ -2807,6 +2868,8 @@ def route_disconnected_regions(
                 net_vias=net_vias,
                 max_track_width=max_track_width,
                 min_track_width=min_track_width,
+                widen_obstacles=_widen_map(),
+                widen_map_width=widen_map_width,
                 max_iterations=min(max_iterations * 5, 1_000_000),
                 coord=coord,
                 verbose=verbose,
@@ -2825,7 +2888,7 @@ def route_disconnected_regions(
         # narrow width -- built lazily once per net and kept in sync with the
         # connections already added this loop. A narrow bridge beats a split
         # plane.
-        if result is None and config.track_width < min_track_width - 1e-9:
+        if result is None and narrow_track_width < min_track_width - 1e-9:
             if narrow_obstacles is None:
                 print(f"{YELLOW}narrow-map{RESET} ", end="", flush=True)
                 narrow_obstacles, _ = build_base_obstacles(
@@ -2833,7 +2896,7 @@ def route_disconnected_regions(
                     routing_layers=routing_layers,
                     pcb_data=pcb_data,
                     config=config,
-                    track_width=config.track_width,
+                    track_width=narrow_track_width,
                     track_via_clearance=track_via_clearance,
                     hole_to_hole_clearance=hole_to_hole_clearance)
                 for (_rp, _vp, _tw) in routes_added_replay:
@@ -2841,7 +2904,7 @@ def route_disconnected_regions(
                         narrow_obstacles, _rp, _vp, layer_map, _tw,
                         config.clearance, track_via_clearance, config,
                         hole_to_hole_clearance)
-            print(f"{YELLOW}narrow-width {config.track_width:.3f}{RESET} ",
+            print(f"{YELLOW}narrow-width {narrow_track_width:.3f}{RESET} ",
                   end="", flush=True)
             result, track_width, open_space_via, _ = _try_route_between_regions(
                 full_i, full_j,
@@ -2851,8 +2914,8 @@ def route_disconnected_regions(
                 config=config,
                 bounds=zone_bounds,
                 net_vias=net_vias,
-                max_track_width=config.track_width,
-                min_track_width=config.track_width,
+                max_track_width=narrow_track_width,
+                min_track_width=narrow_track_width,
                 max_iterations=min(max_iterations * 5, 1_000_000),
                 coord=coord,
                 verbose=verbose,
@@ -3017,12 +3080,13 @@ def route_disconnected_regions(
             hole_to_hole_clearance
         )
         routes_added_replay.append((route_points, via_positions, track_width))
-        if narrow_obstacles is not None:
-            add_route_to_obstacles(
-                narrow_obstacles, route_points, via_positions, layer_map,
-                track_width, config.clearance, track_via_clearance, config,
-                hole_to_hole_clearance
-            )
+        for _m in (narrow_obstacles, widen_obstacles):
+            if _m is not None:
+                add_route_to_obstacles(
+                    _m, route_points, via_positions, layer_map,
+                    track_width, config.clearance, track_via_clearance, config,
+                    hole_to_hole_clearance
+                )
 
         # Keep track of route for debug output
         previous_routes.append([(p[0], p[1]) for p in route_points])

@@ -707,9 +707,10 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 return True
         return False
 
-    from check_drc import copper_keepout_gate
+    from check_drc import copper_keepout_gate, FilledCopperGate
     _ko_refuses = copper_keepout_gate(pcb_data)
     _area_cfg = config if getattr(config, 'area_clearance', None) is not None else None
+    _close_fills = FilledCopperGate(pcb_data)
 
     def clears(nid, x1, y1, x2, y2, layer, w):
         # #1843: `config` holds a bridge in a rule area to the area's value
@@ -731,6 +732,13 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
         hd = min(hd, _own_net_npth_hole_dist(pcb_data, nid, x1, y1, x2, y2))
         if not (d >= clr + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4):
+            return False
+        # filled footprint copper (an SOT tab): the distances above measure it
+        # by its outline strokes only, so a bridge inside the fill read clear.
+        # The gate lifts a shape for the net its own pads give it, as the
+        # obstacle map does, so a bridge of the tab's own net stays legal.
+        if _close_fills and _close_fills.segment_hit(
+                x1, y1, x2, y2, w, layer, nid, clr) is not None:
             return False
         # #1760: a bridge must not enter a keep-out the route kept out of (a
         # tracks-not-allowed rule area, a net-filtered keep-out). The joint

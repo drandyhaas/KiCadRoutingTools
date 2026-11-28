@@ -1075,6 +1075,55 @@ def widen_link_legs(route_points, used_width, pcb_data, net_id, config,
     return out
 
 
+def off_policy_neck_refusal(legs, extra_conn, used_width, pcb_data, net_id,
+                            config) -> str:
+    """Why ``--escalation off`` forbids this link's copper, else ''.
+
+    Under ``off`` a net's copper keeps its own width (get_net_track_width on
+    each layer), with the one exception fab_tiers documents: a neck of at
+    most PAD_ENTRY_NECK_MM of path at a pad entry. A link's under-width
+    copper must therefore total no more than that and lie within it of one
+    of the net's pads. Under ``board`` / ``fab`` nothing is refused here
+    (the narrowing is disclosed by the caller). ``legs`` are
+    ``(x1, y1, x2, y2, layer, width)``; ``extra_conn`` ``(p1, p2, layer)``
+    at ``used_width``."""
+    from fab_tiers import may_narrow
+    if may_narrow():
+        return ''
+    from routing_defaults import PAD_ENTRY_NECK_MM
+    pieces = list(legs) + [(p1[0], p1[1], p2[0], p2[1], l, used_width)
+                           for p1, p2, l in extra_conn]
+    narrow = []
+    for x1, y1, x2, y2, l, w in pieces:
+        try:
+            want = float(config.get_net_track_width(net_id, l))
+        except Exception:                                   # noqa: BLE001
+            continue
+        if w < want - 1e-6:
+            narrow.append((x1, y1, x2, y2, w, want))
+    if not narrow:
+        return ''
+    total = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2, _w, _r in narrow)
+    if total > PAD_ENTRY_NECK_MM + 1e-6:
+        return (f"--escalation off: {total:.2f} mm below the net's "
+                f"{narrow[0][5]:g} mm, over the {PAD_ENTRY_NECK_MM:g} mm "
+                f"pad-entry allowance")
+    pads = list(getattr(pcb_data, 'pads_by_net', {}).get(net_id, []) or [])
+
+    def _to_pad(x, y):
+        best = math.inf
+        for p in pads:
+            dx = max(abs(x - p.global_x) - (p.size_x or 0) / 2, 0.0)
+            dy = max(abs(y - p.global_y) - (p.size_y or 0) / 2, 0.0)
+            best = min(best, math.hypot(dx, dy))
+        return best
+    for x1, y1, x2, y2, w, want in narrow:
+        if max(_to_pad(x1, y1), _to_pad(x2, y2)) > PAD_ENTRY_NECK_MM + 1e-6:
+            return (f"--escalation off: {w:g} mm copper below the net's "
+                    f"{want:g} mm away from any pad entry")
+    return ''
+
+
 def emitted_copper_clear(route_points, extra_conn, width, pcb_data, net_id,
                          config):
     """True when the copper about to be written -- `route_points` at `width`
@@ -2196,12 +2245,13 @@ def oracle_reconnect(board_file: str, net_names, config,
     # still wins via max). In-band pads stay reachable through the #338 spoke
     # exemption in obstacle_map.add_board_edge_obstacles.
     try:
-        from fix_kicad_drc_settings import effective_board_edge_clearance
+        from fix_kicad_drc_settings import (effective_board_edge_clearance,
+                                            edge_clearance_source)
         _eff_edge = effective_board_edge_clearance(
             board_file, config.board_edge_clearance)
         if _eff_edge > (config.board_edge_clearance or 0.0):
             print(f"  KiCad-oracle recheck: board edge clearance {_eff_edge}mm "
-                  f"(project min_copper_edge_clearance)")
+                  f"({edge_clearance_source(board_file)})")
             config = replace(config, board_edge_clearance=_eff_edge)
     except Exception:
         pass
@@ -2964,6 +3014,16 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"(copper would violate clearance, #2004)")
                     _esc2 = None
                 if _esc2 and not _esc2.get('failed'):
+                    _off2 = off_policy_neck_refusal(
+                        [(_s.start_x, _s.start_y, _s.end_x, _s.end_y,
+                          _s.layer, _s.width)
+                         for _s in (_esc2.get('new_segments') or [])],
+                        [], 0.0, pcb_data, net_id, config)
+                    if _off2:
+                        print(f"    {net_name}: exact-fill strap REJECTED "
+                              f"({_off2})")
+                        _esc2 = None
+                if _esc2 and not _esc2.get('failed'):
                     _e2segs = _esc2.get('new_segments') or []
                     _e2vias = _esc2.get('new_vias') or []
                     from plane_pad_tap import note_clearance_used
@@ -3500,6 +3560,16 @@ def oracle_reconnect(board_file: str, net_names, config,
                               f"({_ws.end_x:.2f},{_ws.end_y:.2f}) on {al} "
                               f"(#648)")
                 if _esc and not _esc.get('failed'):
+                    _off3 = off_policy_neck_refusal(
+                        [(_s.start_x, _s.start_y, _s.end_x, _s.end_y,
+                          _s.layer, _s.width)
+                         for _s in (_esc.get('new_segments') or [])],
+                        [], 0.0, pcb_data, net_id, config)
+                    if _off3:
+                        print(f"    {net_name}: escalated weld REJECTED "
+                              f"({_off3})")
+                        _esc = None
+                if _esc and not _esc.get('failed'):
                     _esegs = _esc.get('new_segments') or []
                     _evias = _esc.get('new_vias') or []
                     from plane_pad_tap import note_clearance_used
@@ -3800,6 +3870,13 @@ def oracle_reconnect(board_file: str, net_names, config,
                       f"{by:.2f})  FAILED (the path lays no copper -- a "
                       f"zero-copper weld cannot join clusters KiCad reports "
                       f"apart, #572)")
+                failed += 1
+                continue
+            _off = off_policy_neck_refusal(_legs, _extra_conn, used_width,
+                                           pcb_data, net_id, config)
+            if _off:
+                print(f"    {net_name}: ({ax:.2f},{ay:.2f})<->({bx:.2f},{by:.2f})"
+                      f"  DECLINED ({_off}; left unconnected)")
                 failed += 1
                 continue
             for x1, y1, x2, y2, l1, _lw in _legs:
