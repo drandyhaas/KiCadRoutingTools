@@ -895,6 +895,49 @@ def _final_regrade(pcb_data, output_file: str, return_results: bool,
     return record
 
 
+def restored_as_input(pcb_data, ripped, routed_results, results, requested,
+                      orig_segs, orig_vias) -> set:
+    """The pre-existing nets this run ripped that stand AS THE INPUT HAD THEM.
+
+    `ripped` is the run's registry of them ({net id: name}); `requested` the
+    ids of the nets the run was asked to route; `orig_segs` / `orig_vias` the
+    input's copper by net. A net is as the input had it when it is outside
+    the requested nets, its original copper is the result that stands for it
+    (`is_existing_route`), no rescue or escalation copper was joined to that
+    result, and the board's copper of the net is again exactly the input's.
+
+    Such a net's opens are the input's own -- a fan-out's escape, a stub an
+    earlier step left for a later one to finish -- not this run's casualty.
+    Read as one, it was enrolled for the final reconciliation, a net outside
+    --nets routed with full router power: the laps ripped its neighbours in
+    turn, enrolled them too, routed some of them whole, and the cleanup,
+    which takes every ripped net into its scope, trimmed the escapes put
+    back as dead ends. A run asked for three nets left three array balls
+    with no copper at all, and no later step could fan them out again.
+    """
+    def _ssig(s):
+        a = (round(s.start_x, 3), round(s.start_y, 3))
+        b = (round(s.end_x, 3), round(s.end_y, 3))
+        return (min(a, b), max(a, b), s.layer, round(s.width, 4))
+
+    def _vsig(v):
+        return (round(v.x, 3), round(v.y, 3), round(v.size, 4))
+
+    out = set()
+    for rid in ripped:
+        res = routed_results.get(rid)
+        if (rid in requested or res is None
+                or not res.get('is_existing_route')
+                or any(r.get('extends') is res for r in results)):
+            continue
+        if (sorted(_ssig(s) for s in pcb_data.segments if s.net_id == rid)
+                == sorted(_ssig(s) for s in orig_segs.get(rid, ()))
+                and sorted(_vsig(v) for v in pcb_data.vias if v.net_id == rid)
+                == sorted(_vsig(v) for v in orig_vias.get(rid, ()))):
+            out.add(rid)
+    return out
+
+
 def _escalation_scope(single_ended_nets, pcb_data) -> list:
     """Terminal escalation's candidates: the run's own (name, id) nets plus
     every pre-existing net it ripped (`pcb_data._preexisting_rips`, which is
@@ -5403,6 +5446,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _pe_outcomes: Dict[str, str] = {}
     _pe_attackers: Dict[str, List[str]] = {}
     _victim_retry_names: List[str] = []
+    # Ripped nets that end the main pass as the input had them
+    # (restored_as_input): neither retried, audited as disturbed, nor swept.
+    _pe_as_input: Set[int] = set()
     if _pe_ripped_reg:
         sweep_scope_ids |= set(_pe_ripped_reg)
         # No silent casualties: a pre-existing victim whose reroute landed
@@ -5511,6 +5557,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 print(f"  Pre-existing victim '{_pe_ripped_reg[_rid]}': "
                       f"partial reroute left pads disconnected -- original "
                       f"copper restored (no silent casualties)")
+        _pe_as_input = restored_as_input(
+            pcb_data, _pe_ripped_reg, routed_results, results,
+            ({nid for _nm, nid in single_ended_nets}
+             | set(all_net_ids_to_route or ())),
+            _orig_seg_by_net, _orig_via_by_net)
+        # Cleanup must not touch a net the run left as it came: an escape put
+        # back is a dead end by design, and the dead-end sweep trimmed it.
+        sweep_scope_ids -= _pe_as_input
         print(f"\nPre-existing rip outcome(s) ({len(_pe_ripped_reg)} net(s)):")
         for _rid in sorted(_pe_ripped_reg):
             _rname = _pe_ripped_reg[_rid]
@@ -5554,6 +5608,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # wiring a victim with no result and no legal restore was
             # NOBODY'S responsibility and shipped open with an honest log
             # line (term2_ecp5: +1V1, /PF37+, /PE26+ all ended this way).
+            # ...unless the net stands as the input had it: its opens are the
+            # input's, and the reconciliation owes it no route.
+            if _rid in _pe_as_input:
+                continue
             if _r_pe is None or not _pe_connected(_rid):
                 _victim_retry_names.append(_rname)
 
@@ -6305,7 +6363,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _pe_reg734 = getattr(state, 'preexisting_registered', None) or set()
     _scope734 = ({nid for _nm, nid in single_ended_nets}
                  | set(all_net_ids_to_route or ()))
-    _pe_disturbed_audit = (set(_pe_ripped_reg)
+    _pe_disturbed_audit = ((set(_pe_ripped_reg) - _pe_as_input)
                            | set(getattr(state, 'casualty_custody', {}) or {})
                            | set(state.collision_refused_net_ids or set())
                            | {s.net_id for s in _stale_input_segs}

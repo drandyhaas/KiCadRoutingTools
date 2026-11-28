@@ -9064,9 +9064,17 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     # dead-end spurs and chains via prune_dead_end_segments.
     all_zones = getattr(pcb_data, 'zones', []) or []
     pruned_segments = []
+    # ...and never an EARLIER step's copper put back after a rip (a restore of
+    # an is_existing_route payload): it is the input's, not this route's, and
+    # a fan-out's escape -- a dead end by design -- lost its run to this prune.
+    _input_restore = (trace_event == 'restore'
+                      and bool(result.get('is_existing_route')))
     for net_id in net_ids:
         net_new = [s for s in cleaned_segments if s.net_id == net_id]
         if not net_new:
+            continue
+        if _input_restore:
+            pruned_segments.extend(net_new)
             continue
         anchor = [s for s in pcb_data.segments if s.net_id == net_id]
         net_vias = [v for v in new_vias if v.net_id == net_id]
