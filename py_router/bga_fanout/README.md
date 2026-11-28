@@ -102,7 +102,7 @@ board written, as `route.py` refuses one.
 | `--rebalance-escape` | Rebalance escape directions | False |
 | `--check-for-previous` | Skip existing fanouts | False |
 | `--no-inner-top-layer` | Prevent inner pads from using F.Cu (automatic when the ball gap cannot hold the track at clearance, #1518) | False |
-| `--escape-method` | `auto`, `channel`, `underpad` (dense arrays) or `dogbone` (gap vias); see [Escape methods](#escape-methods) | auto |
+| `--escape-method` | `auto`, `channel`, `underpad` (dense arrays), `dogbone` (gap vias) or `dogbone-only` (gap vias, no escape); see [Escape methods](#escape-methods) | auto |
 | `--plane-drop` | `auto` = drop a via for every excluded plane-net ball after the signal escape (#424); `off` disables. `KICAD_FANOUT_PLANE_DROP=0/1` overrides either | auto |
 | `--plane-net-layers` | The future plane plan, `NET:LAYER[,LAYER...]` per plane net (e.g. `GND:In1.Cu,In4.Cu P3.3V:In2.Cu`): a ball the declared pour will reach on its own layer gets no drop via (see [Plane-ball drops](#plane-ball-drops-424)) | none |
 | `--same-net-pad-clearance` | `> 0` forbids via-in-pad: under-pad escapes and plane drops run dog-bone, a ball with no legal off-pad site fails visibly, and the value is recorded in the sibling `.kicad_pro` for later steps (#581). `-1` allows via-in-pad | the project's record, else allowed |
@@ -322,6 +322,21 @@ in-run plane finalize audits every promise after routing; see
   dog-bone never escapes fewer balls than `underpad`. Coupled diff-pair escapes
   use each ball's gap via the same way (partner legs are checked against the
   partner's via explicitly).
+
+- **`dogbone-only`** - the dog-bones and nothing else: every connected signal
+  ball gets its short stub and its via in a diagonal gap, chosen and checked
+  exactly as `dogbone` chooses one (lane walk included), and no escape run
+  leaves the ball field. A ball of the outer ring may also take the gap half
+  a pitch outside it, which is still under the package. A ball with no free
+  gap takes its via in its pad (pad-clamped, exact-checked, as the plane drops'
+  centre fallback; never under `--same-net-pad-clearance`), and a ball with
+  neither is reported failed by name. Both balls of a coupled diff pair
+  (`--diff-pairs`) are placed together: mirrored about the pair's bisector,
+  else side by side, else both in their pads, and only then one at a time
+  (counted as split on the console). Plane-net balls get their vias from the
+  plane drops (#424) as in every method. No escape-priority pass and no rip or
+  surface rescue runs (each lays escapes); the fab-floor rescue (a smaller
+  via) does.
 
   Notes / when to use it:
   - Use it when `channel` reports dropped balls (`failed > 0`) on a dense array.

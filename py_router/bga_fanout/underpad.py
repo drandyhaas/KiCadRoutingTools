@@ -885,7 +885,12 @@ def generate_underpad_escape(footprint: Footprint,
                              # ball's own class is the caller's (generate_bga_
                              # fanout re-escapes a classed ball with `clearance`
                              # AT its class). None or {}: as before.
-                             net_clearances: Optional[Dict[int, float]] = None
+                             net_clearances: Optional[Dict[int, float]] = None,
+                             # the dog-bone-only fan-out (escape_method=
+                             # 'dogbone-only'): each signal ball gets its
+                             # stub and gap via and no escape run. Not with
+                             # `joint`.
+                             vias_only: bool = False
                              ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """Route BGA signal balls to the boundary under the pad field.
 
@@ -915,6 +920,18 @@ def generate_underpad_escape(footprint: Footprint,
     A ball whose four gap sites are all taken falls back to the classic
     via-in-pad escape, so dog-bone can never escape fewer balls than underpad.
     Coupled diff-pair escapes use each ball's dog-bone site the same way.
+
+    Dog-bone only (`vias_only=True`): every signal ball gets its stub and via
+    and nothing more -- no surface escape, no inner-layer run, no escape
+    plan (`escape_dir_hints` is not read). The via goes in a diagonal gap
+    site chosen as dog-bone mode chooses one (the lane walk included, and
+    the gaps half a pitch outside the outer ring, still under the package), else
+    in the pad as the plane drops' centre fallback places one (never under
+    `no_via_in_pad`); a ball with neither is returned failed. Both balls of
+    a coupled diff pair take their gap sites together: mirrored about the
+    pair's bisector, else side by side, else both in their pads, and only
+    then one ball at a time (counted as split). Pairs go first, then the
+    single balls deepest-first.
 
     Plane-ball drops (#424 D2): with `plane_drop_nets` (a set of net ids), every
     SMD ball on those nets that the fanout would otherwise skip gets a via NOW
@@ -947,6 +964,12 @@ def generate_underpad_escape(footprint: Footprint,
     routing failure is exactly the misreading to avoid. The
     caller names that complement (`bga_fanout.LAST_CANCEL_SKIPPED`).
     """
+    if vias_only:
+        if joint:
+            raise ValueError("generate_underpad_escape: vias_only lays no escape, "
+                             "so it cannot follow a joint escape plan")
+        dogbone = True
+        escape_dir_hints = None
     ref = footprint.reference
     fp_pads = [p for p in footprint.pads if p.net_id]
 
@@ -1147,7 +1170,7 @@ def generate_underpad_escape(footprint: Footprint,
     # own minimums under board (#857).
     floors = escalation_rungs(_copper)
     _fit = pitch - 2 * track_width - 2 * clearance
-    if verbose and via_size > _fit + 1e-9:
+    if verbose and not vias_only and via_size > _fit + 1e-9:
         # #1217: the fit is not clamped to anything a fab makes. Below the
         # smallest via the ladder reaches (0.04 mm at 0.4 pitch), naming it
         # as the fix contradicts the tool, which re-derives each via from its
@@ -2749,7 +2772,7 @@ def generate_underpad_escape(footprint: Footprint,
         # are exactly what walls the single-ended balls' corridors
         # (USER_BUTTON/RAM_LDM). KICAD_FANOUT_PAIR_DIVE=0 restores the
         # surface-first behaviour.
-        if dogbone and _ek.FANOUT_PAIR_DIVE:
+        if vias_only or (dogbone and _ek.FANOUT_PAIR_DIVE):
             remaining_pairs.append((base, pp, nn))
             continue
         if (try_coupled(pp, nn, [(top_idx, False)])
@@ -2811,15 +2834,18 @@ def generate_underpad_escape(footprint: Footprint,
     def _stub_conflict(p, vx, vy, ctx):
         return _seg_conflict(p.net_id, p.global_x, p.global_y, vx, vy, ctx)
 
-    def _choose_dogbone_site(p):
+    def _choose_dogbone_site(p, edge_ok=False):
         """A free diagonal inter-ball gap site for p's dog-bone via, or None.
 
         Candidates are the four half-pitch diagonal gap centres, preferred
         toward the ball's nearest boundary (the escape side) and staggered by
         ring parity (successive rings alternate the perpendicular side) so
-        the vias leave open inner-layer streets between via rows (#128)."""
+        the vias leave open inner-layer streets between via rows (#128).
+        `edge_ok`: the gaps half a pitch outside the outer ring count too
+        (still under the package; a dog-bone-only ball's via is its end)."""
         gx, gy = p.global_x, p.global_y
         hx, hy = grid.pitch_x / 2.0, grid.pitch_y / 2.0
+        mx, my = (hx, hy) if edge_ok else (0.0, 0.0)
         d_e, d_w = grid.max_x - gx, gx - grid.min_x
         d_s, d_n = grid.max_y - gy, gy - grid.min_y
         ex = 1.0 if d_e <= d_w else -1.0
@@ -2855,8 +2881,8 @@ def generate_underpad_escape(footprint: Footprint,
             return cells
 
         def _site_ok(vx, vy, avoid_soft):
-            if not (grid.min_x - 1e-6 <= vx <= grid.max_x + 1e-6
-                    and grid.min_y - 1e-6 <= vy <= grid.max_y + 1e-6):
+            if not (grid.min_x - mx - 1e-6 <= vx <= grid.max_x + mx + 1e-6
+                    and grid.min_y - my - 1e-6 <= vy <= grid.max_y + my + 1e-6):
                 return False
             if avoid_soft:
                 six, siy = occ.cell(vx, vy)
@@ -3288,7 +3314,156 @@ def generate_underpad_escape(footprint: Footprint,
                 coupled_fail.append(base)
         return inner_pads
 
-    if not joint:
+    def _lay_centre_via(p, checked=False):
+        """Ball p's via in its pad, pad-clamped (#202) and exact-checked at the
+        CLAMPED size: after a channel-engine signal pass, inner-layer runs may
+        legally cross this centre, so the underpad centre-reservation contract
+        cannot be assumed. `checked`: the caller has proved the site already
+        (a diff pair's two centres, together). Returns (x, y, size) or None."""
+        gx, gy = p.global_x, p.global_y
+        cs, cd, ckeep = via_for_pad(p)
+        if not checked:
+            # #581 (no_via_in_pad): this IS a via-in-pad
+            if no_via_in_pad or (locked_smd_pads and not via_site_ok(gx, gy, cs / 2.0)):
+                return None
+            if _via_site_conflict(gx, gy, p.net_id, _via_ctx(p.net_id, gx, gy),
+                                  vr=cs / 2.0, vdr=cd / 2.0) is not None:
+                return None
+        occ.block_all(gx, gy, ckeep)
+        exact_vias.append((gx, gy, cs / 2.0, cd / 2.0, p.net_id))
+        vias_to_add.append({'x': gx, 'y': gy, 'size': cs, 'drill': cd,
+                            'layers': list(THROUGH_VIA_LAYERS),
+                            'net_id': p.net_id})
+        return gx, gy, cs
+
+    def _lay_gap_via(p, site, path):
+        """Reserve and emit ball p's dog-bone stub and gap via at `site`
+        (reached along `path`). Returns (x, y, size)."""
+        _reserve_dogbone(p, site, path)
+        for (_ax, _ay), (_bx, _by) in zip(path, path[1:]):
+            tracks.append({'start': (_ax, _ay), 'end': (_bx, _by),
+                           'width': track_width, 'layer': layers[top_idx],
+                           'net_id': p.net_id})
+        vias_to_add.append({'x': site[0], 'y': site[1], 'size': via_size,
+                            'drill': via_drill,
+                            'layers': list(THROUGH_VIA_LAYERS),
+                            'net_id': p.net_id})
+        return site[0], site[1], via_size
+
+    def _lay_ball_via(p):
+        """One via for ball p: a dog-bone stub to a free gap site, else in its
+        pad. Returns ('gap' | 'in_pad', (x, y, size)) or (None, None)."""
+        picked = _choose_dogbone_site(p, edge_ok=vias_only)
+        if picked is not None:
+            return 'gap', _lay_gap_via(p, picked[0], picked[1])
+        v = _lay_centre_via(p)
+        return ('in_pad', v) if v is not None else (None, None)
+
+    def _pair_gap_options(pp, nn):
+        """The two balls' gap sites, taken together: MIRRORED about the pair's
+        bisector (each ball's outer diagonal gap, both on one side of the pair
+        axis), then SIDE BY SIDE (both shifted the same way along the axis,
+        the first ball's via in the gap between the two). The side toward the
+        nearer array edge across the axis first. Yields (kind, site_p,
+        site_n)."""
+        hx, hy = grid.pitch_x / 2.0, grid.pitch_y / 2.0
+        ax, ay = pp.global_x, pp.global_y
+        bx, by = nn.global_x, nn.global_y
+        if abs(bx - ax) >= abs(by - ay):        # the axis runs along x
+            u = 1.0 if bx > ax else -1.0
+            my = (ay + by) / 2.0
+            t = 1.0 if grid.max_y - my <= my - grid.min_y else -1.0
+            for s in (t, -t):
+                yield 'mirrored', (ax - u * hx, ay + s * hy), (bx + u * hx, by + s * hy)
+            for d in (u, -u):
+                for s in (t, -t):
+                    yield 'parallel', (ax + d * hx, ay + s * hy), (bx + d * hx, by + s * hy)
+        else:                                   # the axis runs along y
+            u = 1.0 if by > ay else -1.0
+            mx = (ax + bx) / 2.0
+            t = 1.0 if grid.max_x - mx <= mx - grid.min_x else -1.0
+            for s in (t, -t):
+                yield 'mirrored', (ax + s * hx, ay - u * hy), (bx + s * hx, by + u * hy)
+            for d in (u, -u):
+                for s in (t, -t):
+                    yield 'parallel', (ax + s * hx, ay + d * hy), (bx + s * hx, by + d * hy)
+
+    def _pair_mutual_ok(a, b):
+        """Two validated dog-bones of one pair against EACH OTHER, which
+        neither validation saw (neither is reserved yet): the drill pair at the
+        hole-to-hole floor, the rings and each stub against the other's via at
+        clearance (the two nets differ)."""
+        (sa, pa_), (sb, pb_) = a, b
+        d = math.hypot(sa[0] - sb[0], sa[1] - sb[1])
+        if d < via_drill + _h2h - 1e-6 or d < via_size + clearance - 1e-6:
+            return False
+        need = via_size / 2.0 + track_width / 2.0 + clearance - 1e-6
+        for path, (vx, vy) in ((pa_, sb), (pb_, sa)):
+            for (x1, y1), (x2, y2) in zip(path, path[1:]):
+                if _pt_seg_d(vx, vy, x1, y1, x2, y2) < need:
+                    return False
+        return True
+
+    def _dogbone_only_pass():
+        """The dog-bone-only fan-out (`vias_only`, see the docstring)."""
+        nonlocal nvia
+        counts = {'gap': 0, 'in_pad': 0}
+        pair_counts = {'mirrored': 0, 'parallel': 0, 'in_pad': 0, 'split': 0}
+        n_balls = 2 * len(remaining_pairs) + len(single_pads)
+        pairs = sorted(remaining_pairs, key=lambda t: depth(t[1]) + depth(t[2]), reverse=True)
+        for _ci, (base, pp, nn) in enumerate(pairs):
+            if cancel_check and cancel_check():    # #621
+                return
+            _prog(_ci + 1, len(pairs), f"dog-bone pair {base}")
+            laid = None
+            for kind, s_p, s_n in _pair_gap_options(pp, nn):
+                a = _dogbone_site_valid(pp, s_p, edge_ok=True)
+                b = a and _dogbone_site_valid(nn, s_n, edge_ok=True)
+                if a and b and _pair_mutual_ok(a, b):
+                    _lay_gap_via(pp, *a)
+                    _lay_gap_via(nn, *b)
+                    counts['gap'] += 2
+                    laid = kind
+                    break
+            if laid is None and not no_via_in_pad and _coupled_via_sites_ok(pp, nn):
+                _lay_centre_via(pp, checked=True)
+                _lay_centre_via(nn, checked=True)
+                counts['in_pad'] += 2
+                laid = 'in_pad'
+            if laid is None:
+                # completion first: each ball on its own, disclosed as split
+                laid = 'split'
+                for q in (pp, nn):
+                    k, _v = _lay_ball_via(q)
+                    if k is None:
+                        failed.append(q.net_name)
+                    else:
+                        counts[k] += 1
+            pair_counts[laid] += 1
+        singles = sorted(single_pads, key=depth, reverse=True)
+        for _si, p in enumerate(singles):
+            if cancel_check and cancel_check():    # #621
+                return
+            _prog(_si + 1, len(singles), f"dog-bone {p.net_name}")
+            k, _v = _lay_ball_via(p)
+            if k is None:
+                failed.append(p.net_name)
+            else:
+                counts[k] += 1
+        nvia += counts['gap'] + counts['in_pad']
+        if verbose:
+            _pairs = (", diff pairs: " + ", ".join(f"{n} {k.replace('_', ' ')}"
+                                                     for k, n in pair_counts.items() if n)
+                      if pairs else "")
+            print(f"  Dog-bone only: {counts['gap'] + counts['in_pad']}/{n_balls} "
+                  f"ball(s) given a via ({counts['gap']} gap, {counts['in_pad']} in pad)"
+                  f"{_pairs}; {len(failed)} with no legal via site"
+                  + (f": {', '.join(sorted(failed))}" if failed else ""))
+
+    if vias_only:
+        inner_pads = []
+        _dogbone_only_pass()
+    elif not joint:
         inner_pads = _generic_phases()
 
     def commit_dogbone(p, site, path, carve=None):
@@ -4325,51 +4500,23 @@ def generate_underpad_escape(footprint: Footprint,
                     if rn == p.net_id and abs(rx - gx) < 1e-6 and abs(ry - gy) < 1e-6]
             for t in _own:
                 reserved_sites.remove(t)
-            picked = _choose_dogbone_site(p)
-            if picked is not None:
-                site, _dbp = picked
-                _reserve_dogbone(p, site, _dbp)
-                vx, vy = site
-                for (_ax, _ay), (_bx, _by) in zip(_dbp, _dbp[1:]):
-                    tracks.append({'start': (_ax, _ay), 'end': (_bx, _by),
-                                   'width': track_width,
-                                   'layer': layers[top_idx],
-                                   'net_id': p.net_id})
-                vias_to_add.append({'x': vx, 'y': vy, 'size': via_size,
-                                    'drill': via_drill,
-                                    'layers': list(THROUGH_VIA_LAYERS),
-                                    'net_id': p.net_id})
-                _net_vias.setdefault(p.net_id, []).append((vx, vy, via_size / 2.0))
-                n_gap += 1
-                r['gap'] += 1
-                continue
-            # Centre fallback: via-in-pad tap at the ball, pad-clamped (#202).
-            # Exact-checked at the CLAMPED size: after a channel-engine signal
-            # pass, inner-layer runs may legally cross this centre, so the
-            # underpad centre-reservation contract cannot be assumed here.
-            cs, cd, ckeep = via_for_pad(p)
-            _ctx = _via_ctx(p.net_id, gx, gy)
-            # #581 (no_via_in_pad): the centre fallback IS a via-in-pad --
-            # fail the drop instead (the ball is left for the plane tap,
-            # which honors the same constraint through its via map).
-            ok = not no_via_in_pad
-            ok = ok and not (locked_smd_pads and not via_site_ok(gx, gy, cs / 2.0))
-            if ok and _via_site_conflict(gx, gy, p.net_id, _ctx,
-                                         vr=cs / 2.0, vdr=cd / 2.0) is not None:
-                ok = False
-            if not ok:
+            # A dog-bone gap site, else the centre fallback: a via-in-pad tap
+            # at the ball (#581 no_via_in_pad fails the drop instead -- the
+            # ball is left for the plane tap, which honors the same
+            # constraint through its via map).
+            kind, laid = _lay_ball_via(p)
+            if kind is None:
                 reserved_sites.extend(_own)   # plane step may still tap here
                 n_fail += 1
                 r['failed'] += 1
                 continue
-            occ.block_all(gx, gy, ckeep)
-            exact_vias.append((gx, gy, cs / 2.0, cd / 2.0, p.net_id))
-            vias_to_add.append({'x': gx, 'y': gy, 'size': cs, 'drill': cd,
-                                'layers': list(THROUGH_VIA_LAYERS),
-                                'net_id': p.net_id})
-            _net_vias.setdefault(p.net_id, []).append((gx, gy, cs / 2.0))
-            n_ctr += 1
-            r['in_pad'] += 1
+            _net_vias.setdefault(p.net_id, []).append((laid[0], laid[1], laid[2] / 2.0))
+            if kind == 'gap':
+                n_gap += 1
+                r['gap'] += 1
+            else:
+                n_ctr += 1
+                r['in_pad'] += 1
         if plane_drop_report is not None:
             plane_drop_report.update(
                 {'nets': _rep_nets, 'gap_vias': n_gap, 'pad_vias': n_ctr,
@@ -4410,11 +4557,15 @@ def generate_underpad_escape(footprint: Footprint,
             pairs_msg = f", {n_coupled}/{total_pairs} diff pairs coupled"
             if coupled_fail:
                 pairs_msg += f" ({len(coupled_fail)} fell back single-ended)"
-        engine = "Dog-bone" if dogbone else "Under-pad"
-        print(f"  {engine} escape: {len(signal_pads)-len(failed)}/{len(signal_pads)} "
-              f"signals escaped, {nvia} vias, {len(plane_pads)} plane balls skipped"
-              f"{already}{pairs_msg}, {len(failed)} failed")
-        if dogbone:
+        if vias_only:
+            print(f"  Dog-bone only: no escape runs laid; {len(plane_pads)} plane "
+                  f"ball(s) left to the drop pass{already}")
+        else:
+            engine = "Dog-bone" if dogbone else "Under-pad"
+            print(f"  {engine} escape: {len(signal_pads)-len(failed)}/{len(signal_pads)} "
+                  f"signals escaped, {nvia} vias, {len(plane_pads)} plane balls skipped"
+                  f"{already}{pairs_msg}, {len(failed)} failed")
+        if dogbone and not vias_only:
             print(f"  Dog-bone: {n_db_esc} single-ended run(s) started at a gap "
                   f"via ({len(db_site)} gap sites assigned)")
         if clamp_stats['clamped']:
