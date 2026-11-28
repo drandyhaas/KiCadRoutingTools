@@ -261,7 +261,9 @@ escape past them is dropped and named, like any other.
 
 With any escape method, after the signal escape completes every SMD ball on a
 **plane net** — a net excluded from `--nets` with ≥ 6 balls on the part, or an
-excluded net that already owns a copper zone — is dropped to a via immediately:
+excluded net that already owns a copper zone, is declared in
+`--plane-net-layers`, or has only power pins on the part (its schematic pin
+type) — is dropped to a via immediately:
 a dog-bone via in a free inter-ball gap (the #128 site allocator, exact-checked),
 falling back to a pad-clamped via-in-pad tap. The ball is not routed anywhere;
 the plane poured later picks the via up at fill. This claims the tap while the
@@ -272,6 +274,10 @@ reported in `JSON_SUMMARY.plane_drop`. Disable with `--plane-drop off`;
 `KICAD_FANOUT_PLANE_DROP=0/1` overrides the flag either way (the
 recorded-manifest A/B switch). With `--same-net-pad-clearance > 0` there is no
 via-in-pad fallback: a ball with no free gap is left for the route step.
+Every plane ball the call leaves with no copper is named with its reason, on
+the console and in `JSON_SUMMARY.plane_drop.unserved` (`{ball, net, reason}`):
+a drop that found no via site, or an excluded net none of the tests above
+takes for a plane (a signal another step escapes, or a rail to declare).
 
 **Pour-direct.** A ball needs no drop via at all when a pour of its own net
 already reaches it on the ball's own copper layer (the main fill component, not

@@ -547,7 +547,8 @@ places vias itself, so this is about choosing its options, not via positions):
 **Plane-net balls are dropped to vias automatically (#424).** With any escape
 method, after the signal escape each SMD ball on a plane net — a net excluded
 from the fanout with ≥ 6 balls on the part, or an excluded net that already
-owns a copper zone — gets a via immediately: a dog-bone via in a free
+owns a copper zone, is declared in `--plane-net-layers` or has only power
+pins on the part — gets a via immediately: a dog-bone via in a free
 inter-ball gap, else a via-in-pad tap. The Step 1 pour — run BEFORE fanout and
 before any routing — picks these vias up at fill while the pour is
 still intact, which kills the tap-behind-the-ball-wall failure class (#360)
@@ -558,6 +559,10 @@ for the plan:
 - Keep excluding plane nets from the FANOUT's `--nets` — the exclusion is
   exactly what marks them for drops. (The ROUTE step later includes them,
   #562 — its pour-launch anchors and in-run finalize complete them.)
+- Read `JSON_SUMMARY.plane_drop.unserved`: every plane ball left with no
+  copper, with why. A small rail named there as "not taken for a plane" has
+  no zone yet and no power pin type: name it in `--plane-net-layers` (or
+  pour it first) and re-run the fanout.
 - Pour the planes in Step 1, BEFORE fanout (see the Routing Order Rationale),
   so the drop pass sees real fill.
 - The route step's plane finalize rarely needs to do more than verify under
