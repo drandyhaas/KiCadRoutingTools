@@ -3276,6 +3276,10 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
     # Set attraction path for bus routing (if provided)
     if attraction_path:
         router.set_attraction_path(attraction_path)
+        # An ordered bus member's lane points along each route's own way.
+        from bus_detection import Lane, LaneOrientedRouter
+        if isinstance(attraction_path, Lane):
+            router = LaneOrientedRouter(router, attraction_path)
         if config.verbose:
             layers_in_path = set(p[2] for p in attraction_path)
             print(f"    Bus attraction: {len(attraction_path)} path points, layers={layers_in_path}, radius={bus_attraction_radius_grid} grid, bonus={bus_attraction_bonus}")
@@ -6255,6 +6259,10 @@ def _route_multipoint_main_impl(
 
     if attraction_path:
         router.set_attraction_path(attraction_path)
+        # An ordered bus member's lane points along each route's own way.
+        from bus_detection import Lane, LaneOrientedRouter
+        if isinstance(attraction_path, Lane):
+            router = LaneOrientedRouter(router, attraction_path)
         if config.verbose:
             layers_in_path = set(p[2] for p in attraction_path)
             print(f"    Bus attraction: {len(attraction_path)} path points, layers={layers_in_path}, radius={bus_attraction_radius_grid} grid, bonus={bus_attraction_bonus}")

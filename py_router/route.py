@@ -310,7 +310,7 @@ _FINALIZE_ROUTE_KNOBS = (
     'mps_segment_intersection', 'keepout_enabled', 'keepout_layer',
     'guide_corridor_enabled', 'guide_corridor_layer', 'guide_corridor_spacing',
     'bus_enabled', 'bus_detection_radius', 'bus_attraction_radius',
-    'bus_attraction_bonus', 'bus_min_nets',
+    'bus_attraction_bonus', 'bus_min_nets', 'bus_nets', 'bus_detect',
     'keep_away', 'keep_away_free', 'keep_away_cost',
     # Net-filtered keep-outs (net_keepouts.py), resolved from the step's
     # .kicad_dru: a reconnect of a bound net must stay out of the regions the
@@ -2660,6 +2660,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 bus_attraction_radius: float = 5.0,
                 bus_attraction_bonus: int = 5000,
                 bus_min_nets: int = 2,
+                bus_nets: Optional[List[List[str]]] = None,
+                bus_detect: bool = True,
                 guide_corridor_enabled: bool = False,
                 guide_corridor_layer: str = "User.1",
                 guide_corridor_spacing: float = 0.0,
@@ -3647,6 +3649,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         time_matching=time_matching, time_match_tolerance=time_match_tolerance,
         debug_memory=debug_memory, layer_costs=layer_costs
     )
+    # Declared ordered buses (--bus-nets): route.py's own, not route_diff's.
+    config_kwargs.update(bus_nets=list(bus_nets or []), bus_detect=bus_detect)
     config_kwargs['power_tap_neckdown'] = power_tap_neckdown
     # #1253: the rules the board's design brief declares join the caller's,
     # read here in the engine so the CLI and the GUI both get them with no
@@ -11136,6 +11140,12 @@ For differential pair routing, use route_diff.py:
                              f"at 90%% -- 4500 and above is full strength (default: {defaults.BUS_ATTRACTION_BONUS})")
     parser.add_argument("--bus-min-nets", type=int, default=defaults.BUS_MIN_NETS,
                         help=f"Minimum nets to form a bus group (default: {defaults.BUS_MIN_NETS})")
+    parser.add_argument("--bus-nets", action="append", default=[], metavar="NET,NET,...",
+                        help="Declare a bus by its nets, comma-separated, in the order they must keep side by "
+                             "side along their common run (e.g. by potential); repeatable, one bus each. Each "
+                             "member is attracted to its own lane of the bus's planned corridor, one track + "
+                             "clearance apart, so the order holds through bends and layer changes. Turns bus "
+                             "routing on for these nets only; add --bus to detect other buses as well")
     parser.add_argument("--guide-corridor", action="store_true",
                         help="Steer routed nets along a guide polyline drawn on a User layer (issue #7)")
     parser.add_argument("--guide-corridor-layer", type=str, default=defaults.GUIDE_CORRIDOR_LAYER,
@@ -11915,7 +11925,9 @@ For differential pair routing, use route_diff.py:
                 heuristic_weight=args.heuristic_weight,
                 turn_cost=args.turn_cost,
                 direction_preference_cost=args.direction_preference_cost,
-                bus_enabled=args.bus,
+                bus_enabled=args.bus or bool(args.bus_nets),
+                bus_nets=[[n.strip() for n in spec.split(',') if n.strip()] for spec in args.bus_nets],
+                bus_detect=args.bus,
                 bus_detection_radius=args.bus_detection_radius,
                 bus_attraction_radius=args.bus_attraction_radius,
                 bus_attraction_bonus=args.bus_attraction_bonus,

@@ -580,11 +580,18 @@ def route_single_ended_nets(
                      getattr(config, 'ordering_strategy', '') == 'bus')
     if _bus_ordering:
         net_ids_to_check = [net_id for _, net_id in single_ended_nets]
+        # Declared buses (--bus-nets): ordered, taken as given -- neither
+        # detected nor filtered; detection (--bus) sees only the other nets.
+        from bus_detection import declared_bus_groups
+        _routed_ids = set(net_ids_to_check)
+        declared = [g for g in declared_bus_groups(pcb_data, getattr(config, 'bus_nets', None) or [])
+                    if all(nid in _routed_ids for nid in g.net_ids)]
+        _declared_ids = {nid for g in declared for nid in g.net_ids}
         bus_groups = detect_bus_groups(
-            pcb_data, net_ids_to_check,
+            pcb_data, [nid for nid in net_ids_to_check if nid not in _declared_ids],
             detection_radius=config.bus_detection_radius,
             min_nets=config.bus_min_nets
-        )
+        ) if getattr(config, 'bus_detect', True) else []
         # Strict geometric bus definition (see filter_bus_groups_geometric):
         # only groups that genuinely travel together survive; raw cliques
         # bundled decoupling clusters and power rails and planned corridors
@@ -592,6 +599,8 @@ def route_single_ended_nets(
         from bus_detection import filter_bus_groups_geometric
         _raw_n = len(bus_groups)
         bus_groups = filter_bus_groups_geometric(pcb_data, bus_groups, config)
+        _raw_n += len(declared)
+        bus_groups = declared + bus_groups
         if _raw_n != len(bus_groups):
             print(f"  Bus filter: {_raw_n} raw clique group(s) -> "
                   f"{len(bus_groups)} geometric bus(es)")

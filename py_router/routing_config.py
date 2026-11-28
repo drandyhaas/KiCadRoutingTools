@@ -451,6 +451,11 @@ class GridRouteConfig:
     bus_min_nets: int = 2  # Minimum nets to form a bus
     bus_attraction_radius: float = 5.0  # mm - attraction radius from neighbor track
     bus_attraction_bonus: int = 5000  # Cost bonus for staying near neighbor
+    # Buses declared by net list (--bus-nets), each list the side-by-side
+    # order its members keep along the run; bus_detect False routes only these
+    # as buses (--bus-nets without --bus).
+    bus_nets: List[List[str]] = field(default_factory=list)
+    bus_detect: bool = True
     # Guide corridor - route selected nets through a user-drawn polyline (issue #7)
     guide_corridor_enabled: bool = False  # Steer routed nets along a drawn guide path
     guide_corridor_layer: str = "User.1"  # User layer the guide polyline is drawn on
