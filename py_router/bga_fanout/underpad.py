@@ -490,8 +490,9 @@ class _Occ:
         disk -- mirrors the main obstacle map's polygon rasteriser so a
         meander-antenna / comb pad stops phantom-blocking escapes far from any
         real copper (#232 class, BGA side)."""
-        from check_drc import _point_in_poly
-        from geometry_utils import point_to_segment_distance
+        import numpy as np
+        from routing_utils import _kernels
+        poly_keepout_cells = _kernels().poly_keepout_cells
         pts = [pt for poly in polys for pt in poly]
         if not pts:
             return
@@ -500,41 +501,25 @@ class _Occ:
         ia, ja = self.cell(min(xs) - r, min(ys) - r)
         ib, jb = self.cell(max(xs) + r, max(ys) + r)
         thr = r + 1e-9
-        # #561: threshold DECISION, not exact distance -- early-exit on the
-        # first edge within thr, with a per-edge bbox reject (identical
-        # accept/reject outcome to _point_to_polys_distance(...) <= thr;
-        # profiled 55 of 65 s at 72M exact distance calls).
-        edges = []
+        # #561: threshold DECISION, not exact distance -- per polygon, the
+        # inside test, then each edge's bbox reject and point-to-segment
+        # distance <= thr (identical accept/reject outcome to
+        # _point_to_polys_distance(...) <= thr). The cell loop runs in Rust
+        # (grid_router.poly_keepout_cells) with the same float expressions
+        # in the same order as _point_in_poly / point_to_segment_distance.
+        offs = [0]
         for poly in polys:
-            n = len(poly)
-            e = []
-            for i in range(n):
-                x1, y1 = poly[i]
-                x2, y2 = poly[(i + 1) % n]
-                e.append((min(x1, x2) - thr, max(x1, x2) + thr,
-                          min(y1, y2) - thr, max(y1, y2) + thr,
-                          x1, y1, x2, y2))
-            edges.append((poly, e))
-
-        def _within(x, y):
-            for poly, e in edges:
-                if _point_in_poly(x, y, poly):
-                    return True
-                for (bx0, bx1e, by0, by1e, x1, y1, x2, y2) in e:
-                    if x < bx0 or x > bx1e or y < by0 or y > by1e:
-                        continue
-                    if point_to_segment_distance(x, y, x1, y1, x2, y2) <= thr:
-                        return True
-            return False
-        for a in range(max(0, ia), min(self.nx, ib + 1)):
-            for b in range(max(0, ja), min(self.ny, jb + 1)):
-                x, y = self.xy(a, b)
-                if _within(x, y):
-                    if li is None:
-                        for k in range(self.nl):
-                            self.grid[k][a * self.ny + b] = 1
-                    else:
-                        self.grid[li][a * self.ny + b] = 1
+            offs.append(offs[-1] + len(poly))
+        hits = poly_keepout_cells(
+            np.array([(p[0], p[1]) for p in pts], dtype=np.float64),
+            np.asarray(offs, dtype=np.int64), thr,
+            float(self.x0), float(self.y0), float(self.res),
+            max(0, ia), min(self.nx, ib + 1),
+            max(0, ja), min(self.ny, jb + 1), self.ny)
+        if not len(hits):
+            return
+        for k in (range(self.nl) if li is None else (li,)):
+            np.frombuffer(self.grid[k], dtype=np.uint8)[hits] = 1
 
     def blocked(self, li, ix, iy):
         return self.grid[li][ix * self.ny + iy]
