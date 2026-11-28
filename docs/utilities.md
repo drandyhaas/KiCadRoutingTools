@@ -22,6 +22,7 @@ runnable tool in the clone with a one-line purpose.
   [reference planes](#reference-plane-check-check_reference_planepy) ·
   [power drop](#power-drop-report-check_power_droppy) ·
   [reachability](#reachability-check-check_reachabilitypy) ·
+  [fan-out check](#fan-out-check-check_fanoutpy) ·
   [net forensics](#net-forensics-net_forensicspy) ·
   [hand-join verifier](#hand-join-verifier-check_joinpy)
 - Placement: [placer](#placer-place_simplepy) ·
@@ -1363,7 +1364,12 @@ placement pass that moves parts and routes again needs:
   occupancy is its track length times the routing pitch (track width plus
   clearance), plus its vias' footprint on every layer they cross, over its
   area on the layers that carry signal copper. Cells at `--hot` (0.5) or more are
-  joined into areas, each listed with its parts and the nets through it;
+  joined into areas, each listed with its parts and the nets through it.
+  Plane layers are left out of the grid;
+- **plane tracks**: tracks on a plane layer (a copper layer typed `power`) of
+  nets with no pour on it, by layer and net. Each one cuts the plane; route
+  again with `-1` for that layer in `--layer-costs`, or without
+  `--layer-costs` (see [Layer Costs](configuration.md#layer-costs));
 - **turned parts**: two-pad parts whose two nets would both be shorter with
   the part turned 180°.
 
@@ -3571,6 +3577,46 @@ copper for each pad it drops.
 ```bash
 python3 py_tools/check_reachability.py board.kicad_pcb --part U3
 ```
+
+## Fan-out Check (`check_fanout.py`)
+
+Before routing a fine-pitch part: which of its pins can't fan out to a via
+with this placement, and which parts block them (#2029)? A fan-out is a track
+at the pin's net-class width from the pad to a net-class via outside the pad
+ring, legal on every copper layer and outside any rule area that bans vias.
+
+```bash
+python3 py_tools/check_fanout.py board.kicad_pcb --component U1
+python3 py_tools/check_fanout.py board.kicad_pcb -c U1 --layers F.Cu B.Cu --json
+```
+
+| Verdict | Meaning |
+|---|---|
+| `escapes` | reaches a via site, and one is left for it when all pins fan out at once |
+| `local` | reaches its own net's copper outside the part on its layer (a decap pad, a locked fan-out track or via) |
+| `exposed pad` | its net is on the part's interior pad |
+| `through-hole` | the pad is drilled, so it is its own via |
+| `unconnected` | its net reaches no other part or pour |
+| `caged` | no via site is reachable even with the board to itself; the parts lining the pocket are named |
+| `crowded` | reaches via sites alone, but they run out when all pins fan out at once; reported by group with the parts that wall it |
+
+`caged` uses each net's own field (`reachability.slack_field`), with every
+foreign object held to the clearance its pair gets (#1625). `crowded` is an
+estimate: a max flow on a lattice of one Default lane per cell, with via sites
+on a grid that keeps a track between neighbours and one pin per site. `local`
+pins take no part in it. The window is `--margin` mm round the pad ring
+(default 3). A group whose region reaches the window edge says so, because a
+wider window may find more sites.
+
+By default the layers are the copper layers minus those typed `power`, as
+`route.py` bans them; `--layers` overrides. The via still passes through every
+layer. Routed copper is set aside as in `check_reachability`, and locked
+copper stays, so a locked hand fan-out reads `local`.
+
+If every pin escapes and the router still leaves the part's nets open, the
+router's escape is at fault, not the placement. `check_reachability --part`
+asks the track-only form of the question, with free vias. Exit 0 when every
+pin fans out, 1 when a pin is caged or crowded, 2 on a usage error.
 
 ## Net Forensics (`net_forensics.py`)
 

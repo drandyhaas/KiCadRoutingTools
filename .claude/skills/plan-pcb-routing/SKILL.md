@@ -382,6 +382,12 @@ Spotting one: the footprint name contains `AQFN`, or the part has far more pads
 than a single peripheral ring of its size would hold (73-90 pads on a 7x7mm
 body), or `bga_fanout.py` reports a pitch that is half the name's `P<pitch>mm`.
 
+**Before fanning out a fine-pitch part, check that the placement allows it:**
+`python3 -X utf8 py_tools/check_fanout.py <board> --component U1` (#2029). A `caged` or
+`crowded` pin is placement: move the parts it names. When every pin escapes and
+the route still leaves the part's nets open, the router's escape is at fault:
+change the fan-out method, don't re-place.
+
 **Crowded fine-pitch QFN edge (surface fan has no room):** if a `qfn_fanout`
 stub (especially a diff pair) is boxed in by a neighbour pair and a foreign
 track and the surface 45° fan drops it, use `qfn_fanout.py --escape-method

@@ -1022,7 +1022,7 @@ See [Rip-Up and Reroute](rip-up-reroute.md) for how failed routes trigger rip-up
 | `--ordering` / `-o` | mps | Net ordering: `mps`, `inside_out`, or `original`; `route.py` also takes `bus` (detected bus groups first, members middle-out, the rest by mps; ordering only, corridor attraction still needs `--bus`). See [Net Ordering](net-ordering.md) |
 | `--direction` / `-d` | forward | Direction: `forward` or `backward` |
 | `--layers` / `-l` | all copper layers | Routing layers. For `route.py` the default is all of the board's copper layers; `route_diff.py` and `bga_fanout.py` default to `F.Cu B.Cu` |
-| `--layer-costs` | (see below) | Per-layer cost multipliers (1.0-1000; a negative value forbids track on that layer, which stays an obstacle vias may span), one per `--layers` entry (any other count is refused, see [Layer Costs](#layer-costs)). `route.py` default: all 1.0 when routing 4+ layers, else F.Cu=1.0 and the others 3.0; `route_diff.py` default: all 1.0 |
+| `--layer-costs` | (see below) | Per-layer cost multipliers (1.0-1000; a negative value forbids track on that layer, which stays an obstacle vias may span), one per `--layers` entry (any other count is refused, see [Layer Costs](#layer-costs)). `route.py` default: all 1.0 when routing 4+ layers, else F.Cu=1.0 and the others 3.0, and -1 on a layer typed `power`; `route_diff.py` default: all 1.0 |
 | `--no-bga-zones [REFS...]` | (auto-detect) | Disable BGA exclusion zones. No args = all. With refs (U1 U3) = only those |
 | `--no-crossing-layer-check` | off | Count crossings between routes whatever their layers (by default only same-layer crossings count) |
 | `--mps-reverse-rounds` | off | Route the most-conflicting MPS groups first (instead of least) |
@@ -1570,9 +1570,16 @@ The `--layer-costs` parameter controls per-layer routing preferences. Higher cos
 uses 1.0 on every layer):
 - 4+ layers: all 1.0 (inner layers available for balanced routing)
 - 2 layers: F.Cu=1.0, B.Cu=3.0 (prefer top layer for cleaner assembly)
+- either way, -1 on a copper layer typed `power` (a plane). Board Setup >
+  Board Stackup > Board Editor Layers sets each layer's type
 
 A negative value (e.g. `-1`) forbids the layer: it stays an obstacle and
 through-vias may span it, but no track is placed on it.
+
+`route.py` warns when `--layer-costs` prices a `power` layer under 3.0,
+because its tracks may cut the plane. Pass `-1` for that layer to keep it
+solid. It stays quiet at 3.0 and up, the price autoroute's later passes use
+to cross a plane.
 
 **Example:** To keep signals on F.Cu and only use B.Cu when necessary:
 ```bash
