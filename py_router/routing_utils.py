@@ -494,13 +494,41 @@ _CIRCLE_OFFSETS_CACHE: Dict[Tuple[int, float], "np.ndarray"] = {}
 GRID_TIE_EPS = 1e-6
 
 
+_GRID_ROUTER = None
+
+
+def _kernels():
+    """grid_router, imported on first use so modules that never build a
+    capsule do not need the extension. Both capsule forms are computed there
+    (geometry_kernels.capsule_spans / capsule_cells): the same predicate as
+    _capsule_mask below, bit for bit, without the per-call numpy setup that
+    dominated a cache miss."""
+    global _GRID_ROUTER
+    if _GRID_ROUTER is None:
+        # The extension lives in rust_router/; put it on the path the way
+        # obstacle_map does, so callers that never import a routing module
+        # (check_connected, the cleanup passes, tests) can load it too.
+        import os
+        import sys
+        rust_dir = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), '..', 'rust_router'))
+        if rust_dir not in sys.path:
+            sys.path.insert(0, rust_dir)
+        import rust_alloc  # noqa: F401  # issue #419: before grid_router loads
+        import grid_router
+        _GRID_ROUTER = grid_router
+    return _GRID_ROUTER
+
+
 def _capsule_mask(x1: float, y1: float, x2: float, y2: float,
                   margin: float, grid_step: float):
     """(xs, ys, mask) for the capsule around (x1,y1)-(x2,y2).
 
-    THE predicate, in one place: both segment_blocked_cells_array and
-    segment_blocked_spans derive from this, so the cell form and the span form
-    can never disagree about membership.
+    THE predicate, as the reference: segment_blocked_cells_array and
+    segment_blocked_spans compute it in grid_router (capsule_cells /
+    capsule_spans, one shared Rust loop, so the cell form and the span form
+    can never disagree about membership); tests/test_geometry_kernels.py
+    holds both to this function bit for bit.
 
     Boundary cells are resolved OPEN via `GRID_TIE_EPS` (see above), which
     makes membership independent of where the capsule sits on the board.
@@ -558,22 +586,7 @@ def segment_blocked_spans(x1: float, y1: float, x2: float, y2: float,
     if cached is not None:
         _SEG_SPAN_CACHE.move_to_end(key)
         return cached
-    xs, ys, _gxg, _gyg, mask = _capsule_mask(x1, y1, x2, y2, margin, grid_step)
-    any_col = mask.any(axis=1)
-    sel = np.flatnonzero(any_col)
-    if sel.size:
-        lo = mask.argmax(axis=1)[sel]
-        hi = mask.shape[1] - 1 - mask[:, ::-1].argmax(axis=1)[sel]
-        out = np.empty((sel.size, 3), dtype=np.int32)
-        out[:, 0] = xs[sel]
-        out[:, 1] = ys[lo]
-        out[:, 2] = ys[hi]
-        # Convexity says each column is contiguous; verify rather than trust,
-        # because a non-contiguous column would silently BLOCK EXTRA cells.
-        if int((out[:, 2] - out[:, 1] + 1).sum()) != int(mask.sum()):
-            raise AssertionError("capsule column not contiguous")
-    else:
-        out = np.empty((0, 3), dtype=np.int32)
+    out = _kernels().capsule_spans(x1, y1, x2, y2, margin, grid_step, GRID_TIE_EPS)
     out.setflags(write=False)
     _SEG_SPAN_CACHE[key] = out
     _SEG_SPAN_ROWS += len(out)
@@ -609,10 +622,7 @@ def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
     if cached is not None:
         _SEG_CAPSULE_CACHE.move_to_end(key)
         return cached
-    _xs, _ys, gxg, gyg, mask = _capsule_mask(x1, y1, x2, y2, margin, grid_step)
-    out = np.empty((int(mask.sum()), 2), dtype=np.int32)
-    out[:, 0] = gxg[mask]
-    out[:, 1] = gyg[mask]
+    out = _kernels().capsule_cells(x1, y1, x2, y2, margin, grid_step, GRID_TIE_EPS)
     out.setflags(write=False)
     _SEG_CAPSULE_CACHE[key] = out
     _SEG_CAPSULE_ROWS += len(out)

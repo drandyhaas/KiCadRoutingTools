@@ -341,6 +341,11 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
             'old_layer': old_layer,
             'new_layer': new_layer
         })
+        new_width = relayer_width(seg, new_layer, config)
+        if abs(new_width - seg.width) > 1e-9:
+            segment_mods[-1]['old_width'] = seg.width
+            segment_mods[-1]['new_width'] = new_width
+            seg.width = new_width
 
         # Modify in memory
         seg.layer = new_layer
@@ -508,12 +513,24 @@ def apply_bare_pad_target_via(pcb_data: PCBData, net_id: int, pad_x: float, pad_
     stub = Segment(
         start_x=anchor_x, start_y=anchor_y,
         end_x=end_x, end_y=end_y,
-        width=config.track_width,
+        width=config.get_net_track_width(net_id, new_layer),
         layer=new_layer,
         net_id=net_id,
     )
     pcb_data.segments.append(stub)
     return via, stub
+
+
+def relayer_width(seg, new_layer: str, config) -> float:
+    """Width a segment must take when it moves to `new_layer`.
+
+    A .kicad_dru track_width rule scoped by layer can give a net a different
+    width window per layer. A layer move that kept the old width shipped
+    0.102 mm tracks on an outer layer whose rule minimum is 0.18 mm and 0.18 mm
+    tracks on inner layers capped at 0.102 mm. The segment keeps its own width
+    (neck-downs, fanout stubs, diff-pair widths), clamped into the destination
+    layer's rule window only: a net no rule binds is never resized."""
+    return config.rule_width_bounds(seg.net_id, new_layer, seg.width)
 
 
 def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_vias: List) -> None:
@@ -547,6 +564,8 @@ def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_
                 abs(seg.end_y - mod['end'][1]) < SEGMENT_MATCH_TOLERANCE and
                 seg.layer == mod['new_layer']):
                 seg.layer = mod['old_layer']
+                if 'old_width' in mod:
+                    seg.width = mod['old_width']
                 break
 
     # Remove added vias
@@ -1078,7 +1097,8 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
     step = max(config.grid_step / 2, 0.02)
     mp = config.max_pair_clearance()
     for seg in segments:
-        seg_half = (seg.width if getattr(seg, 'width', 0) and seg.width > 0
+        seg_half = (relayer_width(seg, dest_layer, config)
+                    if getattr(seg, 'width', 0) and seg.width > 0
                     else config.track_width) / 2
         x1, y1, x2, y2 = seg.start_x, seg.start_y, seg.end_x, seg.end_y
         seg_len = math.hypot(x2 - x1, y2 - y1)
@@ -1121,9 +1141,11 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
     moved = []
     for seg in segments:
         m = copy.copy(seg)
-        m.layer = dest_layer
-        if not (getattr(m, 'width', 0) and m.width > 0):
+        if getattr(m, 'width', 0) and m.width > 0:
+            m.width = relayer_width(seg, dest_layer, config)
+        else:
             m.width = config.track_width
+        m.layer = dest_layer
         moved.append(m)
     why = keepout_refusal(pcb_data, segments=moved)
     if why:
@@ -1204,7 +1226,8 @@ def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_i
         # old config-width centerline test demanded only 0.15 and shipped a
         # kicad-confirmed 0.2mm-spacing graze (issue #357, TX2_P onto TX1_P's
         # In3.Cu corridor).
-        seg_half = (seg.width if getattr(seg, 'width', 0) and seg.width > 0
+        seg_half = (relayer_width(seg, dest_layer, config)
+                    if getattr(seg, 'width', 0) and seg.width > 0
                     else config.track_width) / 2
         sminx, smaxx = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
         sminy, smaxy = min(seg.start_y, seg.end_y), max(seg.start_y, seg.end_y)

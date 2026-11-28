@@ -455,7 +455,20 @@ src/
 
 ## Version History
 
-### 0.25.0 (2026-11-26)
+### 0.25.0 (2026-11-28)
+- **Geometry kernels** (`geometry_kernels.rs`) for three pure-compute Python
+  loops of the route, each the computation it replaces operation for
+  operation (same float expressions in the same order, CPython's `min`/`max`
+  tie rules, `v**2` as the CRT `pow`), so routes are unchanged:
+  `capsule_spans` / `capsule_cells` compute a cache miss of
+  `routing_utils.segment_blocked_spans` / `segment_blocked_cells_array`
+  (the `_capsule_mask` predicate with `GRID_TIE_EPS`, one shared loop);
+  `poly_keepout_cells` is the BGA/QFN escape occupancy's polygon keepout
+  (`_Occ.block_poly`); `component_labels` is the union-find of
+  `check_connected.analyze_conn_excluding`. `point_segment_distances` is
+  `geometry_utils.point_to_segment_distance` over arrays.
+  `tests/test_geometry_kernels.py` holds each to the Python on thousands of
+  seeded random cases.
 - **CountGrid** (`count_grid.rs`): blocked cells, via blocks and via rungs
   move from refcount hash maps to tiled dense u16 counts. Stamp, unstamp and
   lookup are an index; clone and merge copy tiles. `CountGrid::sub` saturates

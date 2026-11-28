@@ -218,8 +218,8 @@ The tier is a **floor ladder**:
 **Escalation policy** (`--escalation`, the same choice on the GUI's Route tab) is
 orthogonal to the tier and bounds every place the engine narrows a track, shrinks a
 via or tightens a clearance to complete a net: the per-net rescue, the terminal
-escalation, the terminal graze neck, fine-pitch plane taps, via-in-pad clamps and
-last-resort vias. Under the default `fab`, a descent may go down to the fab tier
+escalation, the terminal graze neck, fine-pitch plane taps, plane region joins,
+the KiCad oracle's plane links, via-in-pad clamps and last-resort vias. Under the default `fab`, a descent may go down to the fab tier
 floor, below the board's own declared minimums (the writeback then lowers the
 project's `rules.min_*` to match, as before); this is the completion-first setting.
 Under `board`, a descent stops at the board's own `rules.min_*` (Board Setup >
@@ -275,7 +275,16 @@ impedance) net may neck below its width for at most 2 mm of routed path
 rail cannot keep into a narrow pin: a whole edge that short, the last stretch
 into the pin of a longer edge whose rest keeps the net's width (#1452), or one
 via-to-pad tap. A longer neck fails the edge, and the failure names the
-allowance and the edge's span rather than advising a smaller track. A power net's under-width copper is recorded like any other
+allowance and the edge's span rather than advising a smaller track. Under
+`off` the DRC-settings writeback (#160) records what the run asked for (an
+explicit `--clearance`, `--clearance-ceiling`, `--track-width` or via size)
+and the copper it added, but never lowers a declared rule to an object the
+input already held below it: an input pad drill under the hole floor, say,
+is listed at the end of the run and KiCad's DRC reports it, instead of the
+rule being lowered until the board grades clean. The router also routes to
+the copper-to-edge and via-hole clearances KiCad grades the input at (the
+declared rule, else KiCad's factory 0.5 mm / 0.25 mm), as it does whenever
+`--no-fix-drc-settings` leaves the project unwritten. A power net's under-width copper is recorded like any other
 narrowing (below), so `--strict-sizes` still sees it.
 
 **Net-filtered keep-outs.** A KiCad rule area has no net dimension, so a

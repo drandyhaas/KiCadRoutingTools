@@ -182,6 +182,13 @@ Validate routed boards against the *real* spec, with the right checker — most
     window excludes the explicit `--track-width`, the net draws it clamped into
     that window on that layer (down to the rule's max; up only to a CUSTOM
     rule's min), as KiCad's router treats a custom size against a rule.
+    **Every step that picks a width obeys the same window (#2084)**: neck-down,
+    stub layer switches (apply, revert, legality and the file rewrite), the
+    power-width channel and pad taps / dog-bone rescue all clamp through
+    `GridRouteConfig.rule_width_bounds(net, layer, w)`; none may choose a width
+    on its own. Rules no step obeys are listed at start
+    (`DesignRules.unmodelled_rules()`); `KICAD_RULES_STRICT=1` refuses the
+    risky ones.
   - The PLACEMENT CLI `place_fanout_clearance.py` keeps its `--clearance` = ceiling
     contract (#768/#769, pinned by its test family); the GUI fanout tab prices that
     ceiling from the Min Clearance override alone (`placement_clearance_ceiling`).

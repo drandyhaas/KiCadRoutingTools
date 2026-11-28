@@ -37,6 +37,74 @@ except ImportError:
     GridObstacleMap = None
 
 
+class _StaticViaRecord:
+    """A Python-side copy of the via cells a ``_StaticStampProxy`` put in the
+    static via bitmap, over the board's grid box (cells outside it are simply
+    not recorded). #530 rung sub-builds use it to leave out via cells the
+    parent already blocks statically: ``is_via_blocked_rung`` ORs the static
+    bitmap into every rung, and that bitmap is never cleared, so such a cell
+    is blocked at every rung whether or not the rung map holds it. On a large
+    board that was ~30M redundant refcounted rows per rung -- copied through a
+    Python list of tuples into the base and carried by every working clone."""
+    __slots__ = ("ox", "oy", "grid")
+
+    def __init__(self, gx_lo, gy_lo, nx, ny):
+        self.ox, self.oy = int(gx_lo), int(gy_lo)
+        self.grid = np.zeros((int(ny), int(nx)), dtype=bool)
+
+    @classmethod
+    def for_board(cls, pcb_data, coord, margin_cells=400):
+        bb = getattr(pcb_data.board_info, 'board_bounds', None)
+        if not bb:
+            return None
+        x0, y0 = coord.to_grid(bb[0], bb[1])
+        x1, y1 = coord.to_grid(bb[2], bb[3])
+        gx_lo, gy_lo = min(x0, x1) - margin_cells, min(y0, y1) - margin_cells
+        nx = abs(x1 - x0) + 2 * margin_cells + 1
+        ny = abs(y1 - y0) + 2 * margin_cells + 1
+        if nx * ny > 400_000_000:     # >400 MB of bools: not worth it
+            return None
+        return cls(gx_lo, gy_lo, nx, ny)
+
+    def _idx(self, xy):
+        xy = np.asarray(xy).reshape(-1, 2)
+        ix = xy[:, 0].astype(np.int64) - self.ox
+        iy = xy[:, 1].astype(np.int64) - self.oy
+        ok = (ix >= 0) & (iy >= 0) & (ix < self.grid.shape[1]) & (iy < self.grid.shape[0])
+        return ix, iy, ok
+
+    def add_cells(self, xy):
+        ix, iy, ok = self._idx(xy)
+        self.grid[iy[ok], ix[ok]] = True
+
+    def add_spans(self, spans):
+        from obstacle_cache import expand_via_spans
+        a = np.asarray(spans, dtype=np.int32).reshape(-1, 3)
+        if len(a):
+            self.add_cells(expand_via_spans(a))
+
+    def covered(self, xy):
+        """Bool mask: which (gx, gy) rows are in the recorded static set."""
+        ix, iy, ok = self._idx(xy)
+        out = np.zeros(len(ix), dtype=bool)
+        out[ok] = self.grid[iy[ok], ix[ok]]
+        return out
+
+
+def _builds_rung_passes(config, pcb_data) -> bool:
+    """True when ``build_base_obstacle_map`` will run at least one #530 rung
+    sub-build for this config -- the only reader of a ``_StaticViaRecord``, so
+    a board with no per-net via rung never pays for one (up to 400 MB)."""
+    try:
+        from obstacle_cache import via_rungs, _small_via_pair
+        n = len(via_rungs(config, pcb_data))
+        if n and _small_via_pair(config, pcb_data) is not None:
+            n -= 1          # the #568 small rung is not sub-built
+        return n > 0
+    except Exception:       # noqa: BLE001 -- the rung loop reports its own failure
+        return False
+
+
 class _StaticStampProxy:
     """#422: transparent wrapper that redirects every blocked-cell/via ADD to the
     permanent static keep-out bitmap (``add_static_blocked_*``) instead of the
@@ -49,10 +117,11 @@ class _StaticStampProxy:
     (cost maps, BGA zones, source/target, is_blocked, ...) pass through unchanged.
     Byte-identical: is_blocked/is_via_blocked OR the static bitmap, so a
     statically stamped cell blocks exactly as a refcount entry would."""
-    __slots__ = ("_real",)
+    __slots__ = ("_real", "via_record")
 
-    def __init__(self, real):
+    def __init__(self, real, via_record=None):
         object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "via_record", via_record)
 
     def unwrap(self):
         return self._real
@@ -62,18 +131,41 @@ class _StaticStampProxy:
 
     def add_blocked_via(self, gx, gy):
         self._real.add_static_blocked_via(gx, gy)
+        if self.via_record is not None:
+            self.via_record.add_cells([[gx, gy]])
 
     def add_blocked_cells_batch(self, cells):
         self._real.add_static_blocked_cells_batch(cells)
 
     def add_blocked_vias_batch(self, vias):
         self._real.add_static_blocked_vias_batch(vias)
+        if self.via_record is not None:
+            self.via_record.add_cells(vias)
 
     def add_blocked_cell_spans_batch(self, spans):
         self._real.add_static_blocked_cell_spans_batch(spans)
 
     def add_blocked_via_spans_batch(self, spans):
         self._real.add_static_blocked_via_spans_batch(spans)
+        if self.via_record is not None:
+            self.via_record.add_spans(spans)
+
+    # Static via adds made by name (board edge / cutout bands) go to the same
+    # bitmap, so they are recorded too.
+    def add_static_blocked_via(self, gx, gy):
+        self._real.add_static_blocked_via(gx, gy)
+        if self.via_record is not None:
+            self.via_record.add_cells([[gx, gy]])
+
+    def add_static_blocked_vias_batch(self, vias):
+        self._real.add_static_blocked_vias_batch(vias)
+        if self.via_record is not None:
+            self.via_record.add_cells(vias)
+
+    def add_static_blocked_via_spans_batch(self, spans):
+        self._real.add_static_blocked_via_spans_batch(spans)
+        if self.via_record is not None:
+            self.via_record.add_spans(spans)
 
     def __getattr__(self, name):
         return getattr(self._real, name)
@@ -87,17 +179,80 @@ class _RungPassStampProxy:
     per-net via could then sit (rung - run)/2 inside the edge clearance. Here
     every static VIA add lands in the dynamic map instead, so the copy carries
     the band at the rung's own via (track cells do not depend on the via and
-    stay static)."""
-    __slots__ = ("_real",)
+    stay static).
 
-    def __init__(self, real):
+    ``parent_static`` (a _StaticViaRecord, or None): the parent build stamped
+    its copper into the STATIC bitmap, which every rung query ORs in
+    (``is_via_blocked_rung``) and which is never cleared. A via cell the
+    parent holds statically is then blocked at every rung already, so the
+    via adds below leave it out of this map -- same answer at every rung, far
+    fewer refcounted rows. ``add_pour_barrier_obstacles`` also skips island
+    interiors outright (``parent_static_covers``)."""
+    __slots__ = ("_real", "parent_static", "offered")
+
+    def __init__(self, real, parent_static=None):
         object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "parent_static", parent_static)
+        object.__setattr__(self, "offered", [0])   # via rows offered, filtered or not
+
+    @property
+    def parent_static_covers(self):
+        return self.parent_static is not None
+
+    def _uncovered(self, vias):
+        a = np.asarray(vias, dtype=np.int32).reshape(-1, 2)
+        self.offered[0] += len(a)
+        if self.parent_static is None or not len(a):
+            return a
+        return np.ascontiguousarray(a[~self.parent_static.covered(a)])
+
+    def add_blocked_via(self, gx, gy):
+        self.offered[0] += 1
+        if self.parent_static is None or not self.parent_static.covered([[gx, gy]])[0]:
+            self._real.add_blocked_via(gx, gy)
+
+    def add_blocked_vias_batch(self, vias):
+        a = self._uncovered(vias)
+        if len(a):
+            self._real.add_blocked_vias_batch(a)
+
+    def add_blocked_via_spans_batch(self, spans):
+        if self.parent_static is None:
+            self._real.add_blocked_via_spans_batch(spans)
+            return
+        from obstacle_cache import expand_via_spans
+        sp = np.asarray(spans, dtype=np.int32).reshape(-1, 3)
+        if len(sp):
+            self.add_blocked_vias_batch(expand_via_spans(sp))
 
     def add_static_blocked_via(self, gx, gy):
-        self._real.add_blocked_via(gx, gy)
+        self.add_blocked_via(gx, gy)
 
     def add_static_blocked_vias_batch(self, vias):
-        self._real.add_blocked_vias_batch(vias)
+        self.add_blocked_vias_batch(vias)
+
+    # Track cells are DROPPED. The parent reads only this sub-map's rung-0
+    # via cells (`blocked_via_cells_at_rung(0)`), and a track keep-out does not
+    # depend on the via size, so every track row here was refcounted into a
+    # hashmap that was then discarded: ~82M rows (~90 s) on a 1226-via 6-layer
+    # board at a 0.025 mm grid, for nothing. Same discipline as _RungViaSink.
+    def add_blocked_cell(self, gx, gy, layer):
+        pass
+
+    def add_blocked_cells_batch(self, cells):
+        pass
+
+    def add_blocked_cell_spans_batch(self, spans):
+        pass
+
+    def add_static_blocked_cell(self, gx, gy, layer):
+        pass
+
+    def add_static_blocked_cells_batch(self, cells):
+        pass
+
+    def add_static_blocked_cell_spans_batch(self, spans):
+        pass
 
     def add_static_blocked_via_spans_batch(self, spans):
         self._real.add_blocked_via_spans_batch(spans)
@@ -110,7 +265,7 @@ class _RungPassStampProxy:
 #: loop allocates nothing per row.
 _EMPTY_NETS = frozenset()
 
-def _obstacle_progress_reporter(progress_callback):
+def _obstacle_progress_reporter(progress_callback, label: str = ""):
     """Throttled sub-phase progress for the base obstacle build (#556).
 
     Returns ``report(phase, i, n, force=False)``: forwards to
@@ -123,16 +278,48 @@ def _obstacle_progress_reporter(progress_callback):
     t0 = time.time()
     last_cb = [0.0]
     last_print = [t0]
+    # Per-phase wall clock: a phase runs from its first report to the next
+    # phase's first report. Phases of 1 s or more are logged as they end and
+    # summarised by ``report.finish()``, so a slow stage says which one it was
+    # (the throttled i/n lines alone could not: a phase with no inner loop
+    # printed nothing at all).
+    cur = [None, t0]          # [phase, its start time]
+    spent: List[Tuple[str, float]] = []
+    tag = f"obstacles[{label}]" if label else "obstacles"
+
+    def _close(now):
+        if cur[0] is not None:
+            dt = now - cur[1]
+            spent.append((cur[0], dt))
+            if dt >= 1.0:
+                print(f"  {tag}: {cur[0]} done in {dt:.1f}s "
+                      f"({now - t0:.0f}s elapsed)", flush=True)
+                last_print[0] = now
 
     def report(phase: str, i: int, n: int, force: bool = False):
         now = time.time()
+        if phase != cur[0]:
+            _close(now)
+            cur[0], cur[1] = phase, now
         if progress_callback and (force or now - last_cb[0] >= 0.25):
             last_cb[0] = now
             progress_callback(i, n, f"Obstacles: {phase}")
         if now - last_print[0] >= 5.0:
             last_print[0] = now
-            print(f"  obstacles: {phase} {i}/{n} ({now - t0:.0f}s elapsed)",
+            print(f"  {tag}: {phase} {i}/{n} ({now - t0:.0f}s elapsed)",
                   flush=True)
+
+    def finish():
+        now = time.time()
+        _close(now)
+        cur[0] = None
+        total = now - t0
+        if total >= 1.0:
+            parts = ", ".join(f"{p} {dt:.1f}s" for p, dt in spent if dt >= 0.5)
+            print(f"  {tag}: built in {total:.1f}s"
+                  + (f" ({parts})" if parts else ""), flush=True)
+
+    report.finish = finish
     return report
 
 
@@ -292,7 +479,9 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             _area_pass=None,
                             _clearance_floor: Optional[float] = None,
                             _only_nets=None,
-                            _only_copper=None) -> GridObstacleMap:
+                            _only_copper=None,
+                            _rung_parent_static=None,
+                            _rung_proxy_out=None) -> GridObstacleMap:
     """Build base obstacle map with static obstacles (BGA zones, pads, pre-existing tracks/vias).
 
     Excludes all nets that will be routed (nets_to_route) - their stubs will be added
@@ -384,11 +573,22 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # so the multi-million-entry dynamic hashmap is never materialised for base.
     # Guarded by hasattr so an older Rust binary (no static API) falls back to the
     # normal dynamic path. Byte-identical either way.
-    obstacles = (_StaticStampProxy(_real_obstacles)
+    obstacles = (_StaticStampProxy(
+                     _real_obstacles,
+                     # recorded only where a rung sub-build can use it
+                     via_record=(_StaticViaRecord.for_board(pcb_data, coord)
+                                 if (not _rung_pass and _area_pass is None
+                                     and _area is None
+                                     and _builds_rung_passes(config, pcb_data))
+                                 else None))
                  if static_base and hasattr(_real_obstacles, "add_static_blocked_cells_batch")
                  else _real_obstacles)
     if _rung_pass:
-        obstacles = _RungPassStampProxy(_real_obstacles)
+        obstacles = _RungPassStampProxy(
+            _real_obstacles,
+            parent_static=_rung_parent_static if _area is None else None)
+        if _rung_proxy_out is not None:
+            _rung_proxy_out.append(obstacles)
     _stamp_target = obstacles
     if _area_pass is not None:
         obstacles = _area_pass[0].inside(_area_pass[2], _area_pass[3], _area_pass[1],
@@ -458,7 +658,10 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
 
     # #556: sub-phase progress (GUI percentage + throttled log lines) so a
     # minutes-long build on a big board is distinguishable from a hang.
-    _report = _obstacle_progress_reporter(progress_callback)
+    _report = _obstacle_progress_reporter(
+        None if (_rung_pass or _area_pass is not None) else progress_callback,
+        label=(f"via rung {config.via_size:g}/{config.via_drill:g}" if _rung_pass
+               else "rule area" if _area_pass is not None else ""))
 
     # Add segments as obstacles (excluding nets we'll route - their stubs added per-net)
     # Use actual segment width for obstacle, and layer-specific width for routing track
@@ -884,10 +1087,12 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                                extra_clearance)
 
     # Block KiCad native keep-out rule areas (zone (keepout ...)), per-layer (PR #25)
+    _report("rule-area keepouts", 0, 0, force=True)
     add_rule_area_keepout_obstacles(obstacles, pcb_data, config,
                                     extra_clearance=extra_clearance)
 
     # Pour islands of out-of-scope nets that this run could only cut (#1260)
+    _report("pour barriers", 0, 0, force=True)
     add_pour_barrier_obstacles(obstacles, pcb_data, config, extra_clearance,
                                _obstacle_clearance)
 
@@ -895,6 +1100,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     _report("drill holes", 0, 0, force=True)
     add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set,
                              extra_clearance)
+    _report.finish()
 
     # #422: return the real map (never the stamp proxy) so downstream clone/
     # cache/rip-up all operate on the genuine GridObstacleMap with its normal
@@ -905,6 +1111,9 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # this map. Rung 0 stays this map's own blocked_vias / static bitmap; the
     # search consults rung r when routing a net at that size.
     if not _rung_pass and _area_pass is None:
+        _parent_static = (getattr(_stamp_target, 'via_record', None)
+                          if isinstance(_stamp_target, _StaticStampProxy) and _area is None
+                          else None)
         if _area is not None:
             config = _area_config    # each rung's sub-build composes the areas itself
         # The sub-builds below are handed THIS pcb_data, and every build
@@ -929,14 +1138,41 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 if _env_small is not None and _r == 1:
                     continue   # the #568 small rung keeps its base-less (static) discipline
                 from dataclasses import replace as _dc_replace
+                _proxy_out = []
                 _sub = build_base_obstacle_map(
                     pcb_data, _dc_replace(config, via_size=_d, via_drill=_h),
                     nets_to_route, extra_clearance, net_clearances,
-                    static_base=False, _rung_pass=True, stamp_pads=stamp_pads)
-                _cells = _sub.blocked_via_cells_at_rung(0)
-                if _cells:
-                    _real_obstacles.add_blocked_vias_rung_batch(
-                        _r, np.asarray(_cells, dtype=np.int32))
+                    static_base=False, _rung_pass=True, stamp_pads=stamp_pads,
+                    _rung_parent_static=_parent_static,
+                    _rung_proxy_out=_proxy_out)
+                _cells = np.asarray(_sub.blocked_via_cells_at_rung(0),
+                                    dtype=np.int32).reshape(-1, 2)
+                del _sub
+                if _parent_static is not None:
+                    _offered = len(_cells) or (_proxy_out[0].offered[0]
+                                               if _proxy_out else 1)
+                    if len(_cells):
+                        _cells = _cells[~_parent_static.covered(_cells)]
+                    if not len(_cells) and _offered:
+                        # An EMPTY rung map reads as "no rung" (is_via_blocked_rung
+                        # falls back to rung 0's rules), so a rung filtered down to
+                        # nothing keeps one cell the static bitmap already blocks:
+                        # the rung exists and answers exactly as unfiltered.
+                        # argmax finds the first recorded cell without
+                        # materialising every one (argwhere would: ~0.5 GB
+                        # on a large board).
+                        _flat = _parent_static.grid.ravel()
+                        _i = int(_flat.argmax())
+                        if _flat[_i]:
+                            _iy, _ix = divmod(_i, _parent_static.grid.shape[1])
+                            _cells = np.array([[_ix + _parent_static.ox,
+                                                _iy + _parent_static.oy]],
+                                              dtype=np.int32)
+                    print(f"  obstacles[via rung {_d:g}/{_h:g}]: {len(_cells)} via "
+                          f"cell(s) beyond the run via's static keep-out",
+                          flush=True)
+                if len(_cells):
+                    _real_obstacles.add_blocked_vias_rung_batch(_r, _cells)
         except Exception as _re:                              # noqa: BLE001
             print(f"  WARNING: per-net via rungs not stamped on the base map ({_re}); "
                   f"nets with their own via size route at the run's via legality")
@@ -1709,6 +1945,12 @@ def add_pour_barrier_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
     clip = getattr(pcb_data.board_info, 'board_bounds', None)
+    # A #530 rung sub-build whose parent holds these islands in the static
+    # bitmap: the interior is via-blocked at every rung already, so only the
+    # edge band (which grows with the rung's via) is stamped. The interiors of
+    # large pours were tens of millions of refcounted rows (~250 s and GBs of
+    # RAM on a 6-layer 192x124 mm board at a 0.025 mm grid).
+    band_only = bool(getattr(obstacles, 'parent_static_covers', False))
     for b in barriers:
         li = layer_map.get(b.get('layer'))
         if li is None:
@@ -1732,6 +1974,9 @@ def add_pour_barrier_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             # Boundary cells resolve OPEN, as the rule-area stamp does.
             track_mask = inside | (edge_dist < track_clear - GRID_TIE_EPS)
             via_mask = inside | (edge_dist < via_clear - GRID_TIE_EPS)
+            if band_only:
+                obstacles.offered[0] += int(np.count_nonzero(inside))
+                via_mask = via_mask & ~inside
             if track_mask.any():
                 t_gx, t_gy = _box_masked_cells(gx_lo, gy_lo, nx, track_mask)
                 _block_cells_sel(obstacles, t_gx, t_gy, [li])
@@ -5184,9 +5429,12 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
 
     def _via_clr(expanded):
         # A via barrel meets this pad's copper on every layer the pad carries
-        # it -> stack max of the per-layer resolution.
-        return max((_layer_clr(l) for l in expanded if l.endswith('.Cu')),
-                   default=max(clearance, lc))
+        # it -> stack max of the per-layer resolution; its DRILL keeps the
+        # board's copper-to-hole floor off the pad even where the pad's own
+        # override relaxes copper clearance (_via_hole_copper_floor).
+        return max(max((_layer_clr(l) for l in expanded if l.endswith('.Cu')),
+                       default=max(clearance, lc)),
+                   _via_hole_copper_floor(config))
 
     if lc > clearance:
         clearance = lc
@@ -5288,6 +5536,37 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         _batch_vias(obstacles, via_cells, blocked_vias, sink=via_sink)
 
 
+def graded_via_hole_clearance(pcb_data, input_file) -> float:
+    """The copper-to-hole floor KiCad grades the INPUT board's vias at, when
+    the run must route to it (fab_tiers.routes_to_graded_rules: no project
+    written under --no-fix-drc-settings, or the rules promised under
+    --escalation off): the board's declared ``min_hole_clearance``
+    (obstacle_map.declared_hole_clearance), else KiCad's factory 0.25 mm,
+    which is what it loads for a rule the project leaves out. 0.0 otherwise:
+    the writeback records the hole clearance the run routed to, so the
+    shipped board is graded at that. Both routing engines install it on
+    their config (route.batch_route, route_diff.batch_route_diff_pairs)."""
+    import fab_tiers
+    if not fab_tiers.routes_to_graded_rules():
+        return 0.0
+    v, _src = declared_hole_clearance(pcb_data, input_file)
+    if v and v > 0:
+        return float(v)
+    from plane_fill_model import KICAD_FACTORY_HOLE_CLEARANCE
+    return float(KICAD_FACTORY_HOLE_CLEARANCE)
+
+
+def _via_hole_copper_floor(config) -> float:
+    """The via-copper to foreign-pad-copper distance that keeps a via's
+    DRILL ``config.via_hole_clearance`` off the pad: that floor less the via's
+    annular ring. 0.0 when unset."""
+    hc = getattr(config, 'via_hole_clearance', 0.0) or 0.0
+    if hc <= 0:
+        return 0.0
+    ring = max(0.0, (config.via_size - config.via_drill) / 2.0)
+    return max(0.0, hc - ring)
+
+
 def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
                            extra_clearance: float = 0.0):
     """The grid cells a via CENTER must avoid to clear `pad` (via half-size +
@@ -5315,6 +5594,7 @@ def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
     # A pad override REPLACES the resolved value (floored at the board
     # minimum), it is not a floor on top of it -- KiCad semantics, measured.
     clearance = config.pad_override_clearance(clearance, pad)
+    clearance = max(clearance, _via_hole_copper_floor(config))
     if pad.shape in ('circle', 'oval'):
         corner_radius = min(half_width, half_height)
     elif pad.shape == 'roundrect':

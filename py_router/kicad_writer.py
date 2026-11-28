@@ -1424,6 +1424,7 @@ def modify_segment_layers(content: str, segment_mods: List[Dict],
             - net_id: int
             - old_layer: str (optional, for verification)
             - new_layer: str
+            - new_width: float (optional; the destination layer's width)
 
     Returns:
         (modified_content, count_of_modified_segments)
@@ -1540,6 +1541,12 @@ def modify_segment_layers(content: str, segment_mods: List[Dict],
             if chain:
                 mod = dict(chain[-1])
                 mod['new_layer'] = cur
+                # The width of the LAST re-width in the chain is the one the
+                # copper ends at; a chain without one keeps the file width.
+                _ws = [m['new_width'] for m in chain if 'new_width' in m]
+                mod.pop('new_width', None)
+                if _ws:
+                    mod['new_width'] = _ws[-1]
         elif mods:
             # No old_layer recorded anywhere -> legacy "last mod wins".
             mod = mods[-1]
@@ -1559,10 +1566,19 @@ def modify_segment_layers(content: str, segment_mods: List[Dict],
             # that already reads correctly needs no edit.
             for _m in (chain or [mod]):
                 satisfied.add(id(_m))
+            out = full_match
+            if 'new_width' in mod:
+                # A layer move under per-layer width rules re-widths the copper
+                # (stub_layer_switching.relayer_width); the file must agree.
+                _wm = re.search(r'[(]width\s+([0-9.]+)[)]', full_match)
+                w_new = f"{mod['new_width']:.6f}".rstrip('0').rstrip('.')
+                if _wm and _wm.group(1) != w_new:
+                    out = out[:_wm.start(1)] + w_new + out[_wm.end(1):]
             if layer != new_layer:
                 count += 1
                 # Replace the layer in the match
-                return full_match.replace(f'(layer "{layer}")', f'(layer "{new_layer}")')
+                out = out.replace(f'(layer "{layer}")', f'(layer "{new_layer}")')
+            return out
         return full_match
 
     satisfied = set()

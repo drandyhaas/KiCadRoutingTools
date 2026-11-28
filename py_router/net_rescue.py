@@ -1663,6 +1663,13 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                           f"the rest are outside --layers or banned to the net)")
                     continue
                 _cu = [l for l in _pad.layers if l.endswith('.Cu')]
+                # the dogbone runs on the ball's layer: its .kicad_dru width
+                # window there, not the layer-blind scalar
+                try:
+                    _fan_tw = (config.rule_width_bounds(net_id, _cu[0], config.track_width)
+                               if _cu else config.track_width)
+                except Exception:                              # noqa: BLE001
+                    _fan_tw = config.track_width
                 try:
                     _tr = tap_pad_with_escalation(
                         _pad, _cu[0] if _cu else None, net_id, pcb_data,
@@ -1699,7 +1706,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                 _ft, _fv, *_ = generate_bga_fanout(
                                     _fp, pcb_data, net_filter=[net_name],
                                     layers=list(config.layers),
-                                    track_width=config.track_width,
+                                    track_width=_fan_tw,
                                     clearance=config.clearance,
                                     via_size=config.via_size,
                                     via_drill=config.via_drill,
@@ -1747,7 +1754,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                 _ft, _fv, *_ = generate_bga_fanout(
                                     _fp, pcb_data, net_filter=[net_name],
                                     layers=list(config.layers),
-                                    track_width=config.track_width,
+                                    track_width=_fan_tw,
                                     clearance=config.clearance,
                                     via_size=config.via_size,
                                     via_drill=config.via_drill,

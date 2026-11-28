@@ -108,6 +108,11 @@ REGISTRY = {
         'a ~5 s log throttle and a 0.25 s progress-callback throttle, so a '
         'minutes-long build is visibly progressing. Its own docstring: '
         '"Reporting only: the map contents are untouched."'),
+    'py_router/setup_clock.py': (
+        'throttle',
+        "batch_route's setup stage timer: a 1 s threshold decides only "
+        'whether a stage\'s time is PRINTED; nothing it reads reaches a '
+        'routing decision.'),
     'kicad_routing_plugin/gui_utils.py': (
         'throttle',
         'a 0.05 s UI repaint throttle so a fast per-ball burst costs a '
