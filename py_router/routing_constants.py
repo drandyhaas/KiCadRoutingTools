@@ -22,6 +22,11 @@ SOFT_JOINT_MIN_GAP = 0.010
 # "forbidden" (canonical value -1). NOT scaled by 1000.
 FORBIDDEN_LAYER_COST = -1
 
+# The --layer-costs price at which a route pass may cross a solid inner plane:
+# autoroute's later passes, the plan skill's route step. route.py warns about a
+# plane layer priced under it.
+PLANE_FALLBACK_COST = 3.0
+
 # Power net detection patterns (used for auto-exclusion from component routing)
 POWER_NET_EXCLUSION_PATTERNS = [
     '*GND*', '*VCC*', '*VDD*', '+*V', '-*V', 'unconnected-*', ''

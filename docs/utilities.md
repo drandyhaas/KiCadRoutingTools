@@ -1363,7 +1363,12 @@ placement pass that moves parts and routes again needs:
   occupancy is its track length times the routing pitch (track width plus
   clearance), plus its vias' footprint on every layer they cross, over its
   area on the layers that carry signal copper. Cells at `--hot` (0.5) or more are
-  joined into areas, each listed with its parts and the nets through it;
+  joined into areas, each listed with its parts and the nets through it.
+  Plane layers are left out of the grid;
+- **plane tracks**: tracks on a plane layer (a copper layer typed `power`) of
+  nets with no pour on it, by layer and net. Each one cuts the plane; route
+  again with `-1` for that layer in `--layer-costs`, or without
+  `--layer-costs` (see [Layer Costs](configuration.md#layer-costs));
 - **turned parts**: two-pad parts whose two nets would both be shorter with
   the part turned 180°.
 

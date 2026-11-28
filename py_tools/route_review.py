@@ -29,6 +29,10 @@ placement pass that moves parts and routes again:
                    about the footprint origin, which is pad 1 on a
                    through-hole axial, so it swings the body by the pitch
                    instead (#1322).
+  PLANE TRACKS     tracks on a copper layer typed power (a plane) of nets
+                   with no pour on that layer, by layer and net. Each one
+                   cuts the plane. The congestion grid leaves plane layers
+                   out.
 
     python3 -X utf8 py_tools/route_review.py routed.kicad_pcb
     python3 -X utf8 py_tools/route_review.py routed.kicad_pcb --top 12 --json review.json
@@ -92,6 +96,7 @@ def review(pcb_file, cell=2.0, hot=0.5, top=8, pcb=None):
     name = view.name_of
     poured = {z.net_id for z in pour_zones(pcb.zones) if z.net_id}
     tracks = [s for s in pcb.segments if not getattr(s, 'graphic', False) and s.net_id]
+    planes = pcb.board_info.plane_layers
     clearance = board_default_netclass_clearance(pcb_file) or 0.2
     width = statistics.median([s.width for s in tracks]) if tracks else 0.2
     pitch = width + clearance
@@ -130,11 +135,21 @@ def review(pcb_file, cell=2.0, hot=0.5, top=8, pcb=None):
     by_detour = sorted((n for n in nets if n['detour'] and n['tree_mm'] > 3.0),
                        key=lambda n: (-n['detour'], n['net']))[:top]
 
+    # ---- plane tracks
+    plane_nets = {(z.layer, z.net_id) for z in pour_zones(pcb.zones) if z.net_id}
+    on_plane = defaultdict(float)
+    for s in tracks:
+        if s.layer in planes and (s.layer, s.net_id) not in plane_nets:
+            on_plane[(s.layer, name(s.net_id))] += _seg_len(s)
+    plane_tracks = [{'layer': l, 'net': n, 'length_mm': round(L, 1)}
+                    for (l, n), L in sorted(on_plane.items(), key=lambda kv: (-kv[1], kv[0]))]
+
     # ---- congestion
     sig = [s for s in tracks if s.net_id not in view.rails]
     per_layer = defaultdict(float)
     for s in sig:
-        per_layer[s.layer] += _seg_len(s)
+        if s.layer not in planes:
+            per_layer[s.layer] += _seg_len(s)
     total = sum(per_layer.values()) or 1.0
     layers = sorted(l for l, v in per_layer.items() if v >= 0.05 * total) or ['F.Cu']
     occ = defaultdict(float)
@@ -221,16 +236,18 @@ def review(pcb_file, cell=2.0, hot=0.5, top=8, pcb=None):
     turned.sort(key=lambda t: (-t['saves_mm'], t['ref']))
 
     return {'board': pcb_file, 'layers_with_signal': layers, 'pitch_mm': round(pitch, 3),
-            'cell_mm': cell, 'hot': hot,
+            'cell_mm': cell, 'hot': hot, 'plane_layers': planes, 'plane_tracks': plane_tracks,
             'open_nets': opens, 'most_vias': by_vias, 'longest_detours': by_detour,
             'congested_areas': areas[:top], 'turned_parts': turned[:top],
             'counts': {'open': len(opens), 'open_signal': sum(1 for o in opens if not o['poured']),
+                       'plane_track_mm': round(sum(t['length_mm'] for t in plane_tracks), 1),
                        'congested_areas': len(areas), 'turned_parts': len(turned)}}
 
 
 def _print(r):
     c = r['counts']
     print(f"route_review: {c['open']} open net(s), {c['open'] - c['open_signal']} of them poured; "
+          f"{c['plane_track_mm']} mm of track on plane layers; "
           f"{c['congested_areas']} congested area(s), {c['turned_parts']} turned part(s); "
           f"signal layers {', '.join(r['layers_with_signal'])}, pitch {r['pitch_mm']} mm")
     if r['open_nets']:
@@ -239,6 +256,14 @@ def _print(r):
             tag = ' (poured)' if o['poured'] else ('' if o['copper'] else ' (no copper)')
             print(f"   {o['net']}{tag}: disconnected at {', '.join(o['disconnected_pad_parts']) or '?'}"
                   f"; on {', '.join(o['parts'][:8])}")
+    if r['plane_tracks']:
+        print("== tracks on plane layers (they cut the plane; reroute with -1 for the layer "
+              "in --layer-costs, or without --layer-costs)")
+        for layer in r['plane_layers']:
+            rows = [t for t in r['plane_tracks'] if t['layer'] == layer]
+            if rows:
+                print(f"   {layer}: {sum(t['length_mm'] for t in rows):.1f} mm, "
+                      + ', '.join(f"{t['net']} {t['length_mm']}" for t in rows))
     if r['most_vias']:
         print("== most vias (signal nets)")
         for n in r['most_vias']:

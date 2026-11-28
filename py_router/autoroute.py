@@ -114,6 +114,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
+from routing_constants import PLANE_FALLBACK_COST  # noqa: E402
+
 TOOLS = {
     'planes': os.path.join(HERE, 'route_planes.py'),
     'bga': os.path.join(HERE, 'bga_fanout.py'),
@@ -127,7 +129,6 @@ GRID_FINE_PITCH = 0.5        # a part at or under this pitch routes on 0.05
 CONGESTED_NETS = 150         # skill: CONGESTED = fine BGA or > 150 nets
 RAIL_WIDTH = 0.3
 PLANE_LAYER_COST = -1.0      # inner planes stay solid; a positive price lets signals cross
-PLANE_FALLBACK_COST = 3.0    # a later pass's price on a solid plane, the route step's in the plan skill
 ROUTE_PASSES = 3             # the first pass plus up to two on its result
 EFFORT_FACTOR = 2.0          # --effort-factor's default
 

@@ -3360,11 +3360,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Set default layer costs if not specified
     # 4+ layers: all 1.0 (inner layers available for routing)
     # 2 layers: F.Cu=1.0, B.Cu=3.0 (prefer top layer)
+    # Either way a layer typed power (a plane) is forbidden (#2024).
+    from routing_constants import FORBIDDEN_LAYER_COST, PLANE_FALLBACK_COST
+    planes = pcb_data.board_info.plane_layers
     if not layer_costs:
         if len(layers) >= 4:
             layer_costs = [1.0] * len(layers)
         else:
             layer_costs = [1.0 if layer == 'F.Cu' else 3.0 for layer in layers]
+        layer_costs = [FORBIDDEN_LAYER_COST if layer in planes else cost
+                       for layer, cost in zip(layers, layer_costs)]
+        _forbidden = [layer for layer in layers if layer in planes]
+        if _forbidden:
+            print(f"  Forbidden as planes (typed power): {', '.join(_forbidden)}")
 
     # Full-stack normalization: the config must ALWAYS carry every board
     # copper layer -- copper on a layer absent from config.layers is invisible
@@ -3380,7 +3388,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _board_cu = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
     _missing_cu = [l for l in _board_cu if l not in layers]
     if _missing_cu:
-        from routing_constants import FORBIDDEN_LAYER_COST
         layers = list(layers) + _missing_cu
         layer_costs = list(layer_costs) + [FORBIDDEN_LAYER_COST] * len(_missing_cu)
         print(f"  Full-stack: appended {len(_missing_cu)} unrequested copper layer(s) "
@@ -3398,6 +3405,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     costs_str = ', '.join(f"{layers[i]}={layer_costs[i]}x" for i in range(min(len(layers), len(layer_costs))))
     print(f"  Layer costs: {costs_str}")
+    for _layer, _cost in zip(layers, layer_costs):
+        if _layer in planes and 0 <= _cost < PLANE_FALLBACK_COST:
+            print(f"  WARNING: {_layer} is typed power (a plane) but routable at {_cost}x, "
+                  f"so tracks may cut the plane. Pass -1 for {_layer} in --layer-costs "
+                  f"to keep it solid.")
 
     # Calculate layer-specific widths for impedance-controlled routing.
     # #610: with --track-width OMITTED the impedance request sets the width
@@ -11332,7 +11344,8 @@ For differential pair routing, use route_diff.py:
     # Layer preference options
     parser.add_argument("--layer-costs", nargs="+", type=float, default=[],
                         help="Per-layer cost multipliers (1.0-1000; default: 1.0 on every layer when "
-                             "routing 4+ layers, else F.Cu=1.0 and the others 3.0), "
+                             "routing 4+ layers, else F.Cu=1.0 and the others 3.0, and -1 on a "
+                             "layer typed power in the board's layer table), "
                              "or any negative value (e.g. -1) = FORBIDDEN: the layer stays an obstacle "
                              "(its copper blocks vias) and through-vias may span it, but NO track copper "
                              "is placed on it. One value per --layers entry, in that order (another count is "
