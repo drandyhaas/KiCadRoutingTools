@@ -5,7 +5,7 @@ The compiled half of KiCad Routing Tools: the Python extension module
 searches and obstacle map, the placer's per-move kernels, and the grid searches
 of the `awx/` whole-route bus router. The rest is Python that calls in here.
 
-**Current Version: 0.24.1** (the crate version in `Cargo.toml`)
+**Current Version: 0.25.0** (the crate version in `Cargo.toml`)
 
 > **Release note:** the newest published release is
 > [v0.24.1](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.24.1)
@@ -432,6 +432,7 @@ src/
 ├── lib.rs                # module registration, identify_blocking_obstacles, the mimalloc allocator
 ├── types.rs              # state keys, open-set entries, DIRECTIONS, costs, search sinks, RouteStats
 ├── obstacle_map.rs       # GridObstacleMap
+├── count_grid.rs         # CountGrid: 64 x 64 tiles of u16 refcounts behind the obstacle map
 ├── router.rs             # GridRouter: the grid A* (one GridSearch core, tiled NodeStore)
 ├── dubins.rs             # Dubins path length, the PoseRouter heuristic
 ├── pose_router.rs        # PoseRouter: orientation-aware A* for diff-pair centerlines
@@ -442,7 +443,7 @@ src/
 
 ### Key Components
 
-- **GridObstacleMap**: reference-counted FxHashMaps (cells per layer, vias, one per via rung) are the truth; a per-layer bitmap caches "count above zero" for the hot `is_blocked` test, and permanent geometry is held only in static bitmaps
+- **GridObstacleMap**: reference-counted CountGrids (cells per layer, vias, one per via rung: 64 x 64 tiles of u16 counts, allocated on first stamp) are the truth; a per-layer bitmap caches "count above zero" for the hot `is_blocked` test, and permanent geometry is held only in static bitmaps
 - **GridRouter**: one `GridSearch` core behind both entry points (`route_multi` collects stats, `route_with_frontier` collects the frontier); a binary heap, and nodes in a tiled store (64 x 64-cell tiles, 12 bytes a node, the closed flag in the parent index's top bit)
 - **PoseRouter**: one `pose_search` core behind `route_pose` / `route_pose_with_frontier`, each pose's state in one FxHashMap entry
 - **DubinsCalculator**: Computes shortest Dubins path length (LSL, RSR, LSR, RSL, RLR, LRL)
@@ -453,6 +454,28 @@ src/
 - **Placement kernels**: the trees and gap trees keep the Python's float expressions in order; the crossing and pad-hit kernels skip pairs whose boxes cannot meet; the congestion kernels sum a move's change over the cells it reaches, so their totals can differ from a whole-window Python sum in the last bits
 
 ## Version History
+
+### 0.25.0 (2026-11-28)
+- **Geometry kernels** (`geometry_kernels.rs`) for three pure-compute Python
+  loops of the route, each the computation it replaces operation for
+  operation (same float expressions in the same order, CPython's `min`/`max`
+  tie rules, `v**2` as the CRT `pow`), so routes are unchanged:
+  `capsule_spans` / `capsule_cells` compute a cache miss of
+  `routing_utils.segment_blocked_spans` / `segment_blocked_cells_array`
+  (the `_capsule_mask` predicate with `GRID_TIE_EPS`, one shared loop);
+  `poly_keepout_cells` is the BGA/QFN escape occupancy's polygon keepout
+  (`_Occ.block_poly`); `component_labels` is the union-find of
+  `check_connected.analyze_conn_excluding`. `point_segment_distances` is
+  `geometry_utils.point_to_segment_distance` over arrays.
+  `tests/test_geometry_kernels.py` holds each to the Python on thousands of
+  seeded random cases.
+- **CountGrid** (`count_grid.rs`): blocked cells, via blocks and via rungs
+  move from refcount hash maps to tiled dense u16 counts. Stamp, unstamp and
+  lookup are an index; clone and merge copy tiles. `CountGrid::sub` saturates
+  at zero like the hash map's removal.
+- `GridObstacleMap.subtract_counts` (one map's counts off another, for the
+  incremental rescue maps) and `content_digest` (a hash of a map's cells,
+  for `KICAD_NET_MAP_VERIFY=1`).
 
 ### 0.24.1 (2026-11-16)
 - **The pose router's Dubins heuristic reads headings in the grid's frame**

@@ -268,6 +268,10 @@ def refresh() -> None:
     g['UNBLOCK_DEBUG'] = _truthy('KICAD_UNBLOCK_DEBUG')
     g['TAP_CROSS_SCAN'] = _truthy('KICAD_TAP_CROSS_SCAN')
     g['OBSTACLE_AUDIT'] = _truthy('KICAD_OBSTACLE_AUDIT')
+    # Check every single-net map derived incrementally from a shared no-net
+    # base (obstacle_map.incremental_net_map) against a fresh build, by
+    # content digest; a mismatch raises. Debug only: it pays the full build.
+    g['NET_MAP_VERIFY'] = _truthy('KICAD_NET_MAP_VERIFY')
     g['PLANE_MAP_PARITY'] = _truthy('KICAD_PLANE_MAP_PARITY')
     # #678 pour-promise DEFENCE (the copper-changing half: the
     # pad-anchored custody weld links and the ship-time promise-scoped

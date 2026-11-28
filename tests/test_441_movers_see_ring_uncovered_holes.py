@@ -196,18 +196,20 @@ def t_the_three_consumers_use_one_rule():
     # obstacle_map: the signal map and the plane via maps (#1514);
     # single_ended_routing: the movers and the neck's exact standoffs;
     # check_drc: the one copper-to-hole pass, board minimum and rules alike
-    # (#1850).
-    for fname, who, sites in (('obstacle_map.py', 'the router\'s maps', 2),
-                              ('check_drc.py', 'the grader', 1),
-                              ('single_ended_routing.py', 'the copper-movers', 2)):
+    # (#1850). obstacle_map has one more plated_drill_exposed call, the
+    # incremental single-net map's eligibility guard (a net with an exposed
+    # drill is built in full), which stamps nothing.
+    for fname, who, sites in (('obstacle_map.py', 'the router\'s maps', (3, 2)),
+                              ('check_drc.py', 'the grader', (1, 1)),
+                              ('single_ended_routing.py', 'the copper-movers', (2, 2))):
         with open(os.path.join(root, fname)) as f:
             src = f.read()
         found = [len(c.findall(src)) for c in calls]
         left = len(inline.findall(src))
         check(f't_{fname.split(".")[0]}_uses_the_ring_uncovered_test',
-              found == [sites, sites] and left == 0,
-              f'{who}: {found[0]}/{sites} plated_drill_exposed and '
-              f'{found[1]}/{sites} flush_drill_peg call(s); '
+              found == list(sites) and left == 0,
+              f'{who}: {found[0]}/{sites[0]} plated_drill_exposed and '
+              f'{found[1]}/{sites[1]} flush_drill_peg call(s); '
               f'{left} inline copper-vs-drill comparison(s)')
 
 

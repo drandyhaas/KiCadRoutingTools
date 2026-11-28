@@ -12,6 +12,7 @@ use std::collections::HashMap;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;  // v0.17.3: return freed pages to OS
 
 mod types;
+mod count_grid;
 mod obstacle_map;
 mod router;
 mod dubins;
@@ -19,6 +20,7 @@ mod pose_router;
 mod lane_search;
 mod placement_kernels;
 mod pair_search;
+mod geometry_kernels;
 
 pub use obstacle_map::GridObstacleMap;
 pub use router::GridRouter;
@@ -165,5 +167,10 @@ fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(placement_kernels::cong_block_slack, m)?)?;
     m.add_function(wrap_pyfunction!(placement_kernels::overlap_sum, m)?)?;
     m.add_function(wrap_pyfunction!(pair_search::pair_search, m)?)?;
+    m.add_function(wrap_pyfunction!(geometry_kernels::capsule_spans, m)?)?;
+    m.add_function(wrap_pyfunction!(geometry_kernels::capsule_cells, m)?)?;
+    m.add_function(wrap_pyfunction!(geometry_kernels::point_segment_distances, m)?)?;
+    m.add_function(wrap_pyfunction!(geometry_kernels::poly_keepout_cells, m)?)?;
+    m.add_function(wrap_pyfunction!(geometry_kernels::component_labels, m)?)?;
     Ok(())
 }

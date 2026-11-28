@@ -69,6 +69,16 @@ REGISTRY = {
                'the base build used to do this for it)'),
 
     # --- hands the map to a lifter ----------------------------------------
+    ('py_router/net_rescue.py', '_delta_rescue_map'): (
+        CONSUMER_LIFTS, 'the incremental rescue map: returned to '
+                        '_pristine_rescue_map, which lifts the clone it hands out'),
+    ('py_router/obstacle_map.py', 'incremental_net_map'): (
+        CONSUMER_LIFTS, 'a single-net map derived from a no-net base; its '
+                        'caller lifts it, and the KICAD_NET_MAP_VERIFY fresh '
+                        'build is compared and discarded'),
+    ('py_router/obstacle_map.py', 'rebase_no_net_map'): (
+        NOT_ROUTED, 'the cached no-net base brought up to the current copper; '
+                    'never routed on, only cloned by incremental_net_map'),
     ('py_router/route.py', 'batch_route'): (
         CONSUMER_LIFTS, "the run's base map: never routed on directly -- the "
                         'working map clones it and prepare_obstacles_inplace '

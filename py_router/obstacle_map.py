@@ -323,6 +323,151 @@ def _obstacle_progress_reporter(progress_callback, label: str = ""):
     return report
 
 
+class DeltaIneligible(Exception):
+    """A net whose map `incremental_net_map` cannot derive from a shared base."""
+
+
+def net_map_clearance_floor(config, net_clearances, net_id) -> float:
+    """The routing-side clearance floor of a build for `net_id` alone."""
+    return max(config.clearance, (net_clearances or {}).get(net_id, config.clearance))
+
+
+def incremental_net_eligible(pcb_data, config, extra_clearance=0.0,
+                             stamp_pads=True) -> bool:
+    """Whether a single-net map may be derived from a no-net base at all
+    (`incremental_net_map`); the per-net checks raise DeltaIneligible."""
+    if extra_clearance or not stamp_pads:
+        return False
+    if getattr(config, 'via_span', None) or getattr(config, 'area_clearance', None):
+        return False
+    # #1491 scoped .kicad_dru rules are installed for the routed net set
+    # (a rule binds "against a routed net"), so a no-net base prices foreign
+    # copper differently from a build for [net_id].
+    if getattr(config, 'scoped_clearance', None) is not None:
+        return False
+    # #530 per-net rungs are sub-builds at their own via geometry, which no
+    # single-net delta reproduces. The #568 small rung (slot 1) is never
+    # stamped by a build (it keeps its static discipline), so a board whose
+    # only rung is that one builds the same rung-free map either way.
+    from obstacle_cache import via_rungs as _via_rungs, _small_via_pair
+    _rungs = _via_rungs(config, pcb_data)
+    if _rungs and _small_via_pair(config, pcb_data) is not None:
+        _rungs = _rungs[1:]
+    return not _rungs
+
+
+def incremental_net_map(base, pcb_data, config, net_id, net_clearances=None):
+    """The map `build_base_obstacle_map(pcb_data, config, [net_id], net_clearances)`
+    returns, derived from `base` = the same build for NO net at that net's
+    clearance floor (`_clearance_floor=net_map_clearance_floor(...)`):
+
+        map(N) = base - stamps(N) + sense branches(N)
+
+    Every stamp is a refcount increment from the same call a full build makes,
+    so the result equals a fresh build cell for cell (`content_digest`;
+    KICAD_NET_MAP_VERIFY=1 checks every derived map against one). The caller
+    gates on `incremental_net_eligible`; a net this cannot derive raises
+    DeltaIneligible and the caller builds it in full. `base` is not modified;
+    the lift records on `pcb_data` are left as the base build set them (they
+    do not depend on the routed nets for an eligible net)."""
+    minus, plus = build_base_obstacle_map(
+        pcb_data, config, [], net_clearances=net_clearances,
+        _clearance_floor=net_map_clearance_floor(config, net_clearances, net_id),
+        _only_nets={net_id})
+    out = base.clone_fresh()
+    out.subtract_counts(minus)
+    out.merge_blocked_from(plus)
+    if env_knobs.NET_MAP_VERIFY:
+        _records = {_k: getattr(pcb_data, _k, None) for _k in (
+            '_net_tie_lift', '_graphic_own_pad_lift', '_graphic_own_pad_via_lift')}
+        try:
+            fresh = build_base_obstacle_map(pcb_data, config, [net_id],
+                                            net_clearances=net_clearances)
+        finally:
+            for _k, _v in _records.items():
+                setattr(pcb_data, _k, _v)
+        if fresh.content_digest() != out.content_digest():
+            raise AssertionError(f'incremental_net_map: net {net_id} map differs from a fresh build')
+    return out
+
+
+def _segment_copper_key(seg):
+    return ('s', seg.net_id, seg.layer, seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+            seg.width, getattr(seg, 'graphic', False), getattr(seg, 'owner_ref', ''),
+            getattr(seg, 'drawn_width', None))
+
+
+def _via_copper_key(via):
+    return ('v', via.net_id, via.x, via.y, via.size, via.drill, tuple(via.layers or ()),
+            getattr(via, 'via_type', None))
+
+
+def copper_snapshot(pcb_data, previous=None) -> dict:
+    """The board's tracks and vias as a multiset {stamp-relevant fields: [copies]}.
+
+    Copies, so copper a later pass edits in place still diffs as removed with
+    the values it was stamped at; entries unchanged since `previous` reuse
+    its copies."""
+    import copy
+    pool = {k: list(v) for k, v in previous.items()} if previous else {}
+    out: dict = {}
+    for objs, keyf in ((pcb_data.segments, _segment_copper_key),
+                       (pcb_data.vias, _via_copper_key)):
+        for o in objs:
+            k = keyf(o)
+            lst = pool.get(k)
+            out.setdefault(k, []).append(lst.pop() if lst else copy.copy(o))
+    return out
+
+
+def _copper_delta(old: dict, new: dict):
+    removed, added = ([], []), ([], [])
+    for k in old.keys() | new.keys():
+        a, b = old.get(k, ()), new.get(k, ())
+        d = len(b) - len(a)
+        if d:
+            tgt = (added if d > 0 else removed)[0 if k[0] == 's' else 1]
+            tgt.extend(b[:d] if d > 0 else a[:-d])
+    return removed, added
+
+
+def rebase_no_net_map(base, snapshot, pcb_data, config, net_clearances=None,
+                      clearance_floor=None):
+    """Bring `base` -- `build_base_obstacle_map(pcb_data, config, [], ...)` as
+    the board stood at `snapshot` (`copper_snapshot`) -- up to the board's
+    current tracks and vias, in place, and return the new snapshot:
+
+        base(now) = base(then) - stamps(removed copper) + stamps(added copper)
+
+    Each stamp is the call a full no-net build makes for that copper, so the
+    map equals a fresh build cell for cell (KICAD_NET_MAP_VERIFY=1 checks).
+    Raises DeltaIneligible (base untouched) for a change no copper stamp
+    covers: a copper graphic. The caller holds the lift records: a no-net
+    build's records come from pads and graphics, never from routed copper."""
+    new_snap = copper_snapshot(pcb_data, snapshot)
+    removed, added = _copper_delta(snapshot, new_snap)
+    kw = dict(net_clearances=net_clearances, _clearance_floor=clearance_floor)
+    minus = (build_base_obstacle_map(pcb_data, config, [], _only_copper=removed, **kw)
+             if removed[0] or removed[1] else None)
+    plus = (build_base_obstacle_map(pcb_data, config, [], _only_copper=added, **kw)
+            if added[0] or added[1] else None)
+    if minus is not None:
+        base.subtract_counts(minus)
+    if plus is not None:
+        base.merge_blocked_from(plus)
+    if env_knobs.NET_MAP_VERIFY:
+        _records = {_k: getattr(pcb_data, _k, None) for _k in (
+            '_net_tie_lift', '_graphic_own_pad_lift', '_graphic_own_pad_via_lift')}
+        try:
+            fresh = build_base_obstacle_map(pcb_data, config, [], **kw)
+        finally:
+            for _k, _v in _records.items():
+                setattr(pcb_data, _k, _v)
+        if fresh.content_digest() != base.content_digest():
+            raise AssertionError('rebase_no_net_map: base differs from a fresh build')
+    return new_snap
+
+
 def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             nets_to_route: List[int],
                             extra_clearance: float = 0.0,
@@ -332,6 +477,9 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             _rung_pass: bool = False,
                             stamp_pads: bool = True,
                             _area_pass=None,
+                            _clearance_floor: Optional[float] = None,
+                            _only_nets=None,
+                            _only_copper=None,
                             _rung_parent_static=None,
                             _rung_proxy_out=None) -> GridObstacleMap:
     """Build base obstacle map with static obstacles (BGA zones, pads, pre-existing tracks/vias).
@@ -350,6 +498,21 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         stamp_pads: False leaves pad COPPER off the map (their drill holes are
             still stamped). Only for a caller that measures every pad itself,
             exactly: qfn_fanout's stub test. Routing maps keep the default.
+        _clearance_floor: the routing-side clearance floor, given instead of
+            derived from `nets_to_route` -- so a map built for no net prices
+            every obstacle exactly as a build for a net of that floor would.
+        _only_nets: stamp ONLY these nets' copper (segments, filled graphics,
+            vias, pads, and their pads' hole-rule holes), and nothing else --
+            no board edge, keep-outs, drills, rungs or lift records. It is the
+            part of a base built for no net that a build for these nets leaves
+            out, so `incremental_net_map` can subtract it (see there). Raises
+            `DeltaIneligible` on copper whose stamp is not that simple.
+        _only_copper: (segments, vias) -- stamp ONLY these routed tracks and
+            vias (their copper keep-outs and the vias' hole-to-hole drill
+            keep-outs), exactly as a build for no net stamps them, and return.
+            The difference between two no-net builds whose boards differ only
+            in such copper (`rebase_no_net_map`). Raises `DeltaIneligible` on
+            a copper graphic, whose stamp depends on the pads around it.
     """
     # #1842: under a via span this reads the board as the span sees it
     # (via_span.obstacle_board), at every call -- the run's first build and
@@ -373,6 +536,12 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     _routed_clearances = [net_clearances[nid] for nid in nets_to_route_set if nid in net_clearances]
     max_net_clearance = max(_routed_clearances) if _routed_clearances else config.clearance
     effective_clearance = max(config.clearance, max_net_clearance)
+    if _clearance_floor is not None:
+        effective_clearance = _clearance_floor
+    _only = frozenset(_only_nets) if _only_nets is not None else None
+
+    def _skip(nid):
+        return (nid not in _only) if _only is not None else (nid in nets_to_route_set)
 
     def _obstacle_clearance(net_id, pad=None, graphic=False):
         # KiCad pairwise clearance: max(routing-side floor classA, this obstacle net's own class
@@ -479,10 +648,13 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # contact -- the human-routed originals carry the same one-per-shunt
     # kicad shorting_items, which grading treats as the accepted net-tie
     # class (like #408's edge-band items).
-    _tie_corridors = _compute_net_tie_corridors(pcb_data, config, coord)
+    _tie_corridors = (_compute_net_tie_corridors(pcb_data, config, coord)
+                      if _only_copper is None else {})
     _tie_partner_pad_ids = {pid for c in _tie_corridors.values()
                             for pid in c['partner_pad_ids']}
     _tie_recorded: List[tuple] = []  # ('pad', pad_id, cells array)
+    if _only is not None and _only & set(_tie_corridors):
+        raise DeltaIneligible('net-tie corridor')
 
     # #556: sub-phase progress (GUI percentage + throttled log lines) so a
     # minutes-long build on a big board is distinguishable from a hang.
@@ -524,8 +696,13 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # shortcut below and for `prepare_obstacles_inplace` to lift and restore
     # exactly the way the net-tie corridor lift already does.
     _own_pad_nets = {}
-    if any(getattr(s, 'graphic', False) and getattr(s, 'owner_ref', '')
-           for s in pcb_data.segments):
+    _segments = pcb_data.segments if _only_copper is None else _only_copper[0]
+    _vias = pcb_data.vias if _only_copper is None else _only_copper[1]
+    if _only_copper is not None:
+        if any(getattr(s, 'graphic', False) for s in _segments):
+            raise DeltaIneligible('copper graphic in a copper delta')
+    elif any(getattr(s, 'graphic', False) and getattr(s, 'owner_ref', '')
+             for s in pcb_data.segments):
         from check_drc import graphic_own_pad_nets
         # NOT wrapped: this decides whether a pad is REACHABLE, not what gets
         # printed. Losing it silently reinstates the seal it exists to prevent,
@@ -556,13 +733,15 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
             _lift_hole_clr = _rule_hole
     _own_pad_rows: Dict[int, list] = {}
     _own_pad_via_rows: Dict[int, list] = {}
-    _n_segs = len(pcb_data.segments)
-    for _seg_i, seg in enumerate(pcb_data.segments):
+    _n_segs = len(_segments)
+    for _seg_i, seg in enumerate(_segments):
         if (_seg_i & 511) == 0:
             _report("copper", _seg_i, _n_segs)
-        if seg.net_id in nets_to_route_set:
+        if _skip(seg.net_id):
             continue
         _lift_nets = _own_pad_nets.get(id(seg)) if _own_pad_nets else None
+        if _only is not None and _lift_nets:
+            raise DeltaIneligible('own-pad lift copper')
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             # Copper on a layer OUTSIDE config.layers (a 6/8-layer board routed
@@ -702,13 +881,15 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # own-pad net may lift, which are recorded beside the perimeter's own-pad
     # rows and stamped on the real map so the lift can reach them.
     from check_drc import filled_graphic_shapes, filled_graphic_lift_nets
-    _filled = filled_graphic_shapes(pcb_data)
+    _filled = filled_graphic_shapes(pcb_data) if _only_copper is None else None
     if _filled:
         _clip = getattr(pcb_data.board_info, 'board_bounds', None)
         _fps = getattr(pcb_data, 'footprints', None) or {}
         for _sh in _filled:
-            if _sh.net_id in nets_to_route_set:
+            if _skip(_sh.net_id):
                 continue
+            if _only is not None:
+                raise DeltaIneligible('filled copper graphic')
             _gx, _gy = filled_graphic_interior_cells(pcb_data, coord, _sh, _clip)
             if not len(_gx):
                 continue
@@ -733,11 +914,11 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                     _own_pad_via_rows.setdefault(_ln, []).append(_vrows)
 
     # Add vias as obstacles (excluding nets we'll route)
-    _n_vias = len(pcb_data.vias)
-    for _via_i, via in enumerate(pcb_data.vias):
+    _n_vias = len(_vias)
+    for _via_i, via in enumerate(_vias):
         if (_via_i & 255) == 0:
             _report("vias", _via_i, _n_vias)
-        if via.net_id in nets_to_route_set:
+        if _skip(via.net_id):
             continue
         # Compute expansion based on actual via size:
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
@@ -764,6 +945,15 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # the diagonal margin a 45deg track grazes them a sub-cell under clearance.
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid,
                           via_via_expansion_grid, diagonal_margin=defaults.DIAGONAL_MARGIN, routing_layers=config.layers)
+    if _only_copper is not None:
+        # The vias' drills, as add_drill_hole_obstacles stamps every via's
+        # (net-independent, one additive disc per hole); nothing else a
+        # no-net build stamps depends on routed tracks or vias.
+        _drills = [(v.x, v.y, v.drill) for v in _vias if v.drill > 0]
+        if config.hole_to_hole_clearance > 0 and _drills:
+            block_via_cells_near_drills(obstacles, _drills, config.via_drill,
+                                        config.hole_to_hole_clearance, config.grid_step)
+        return _real_obstacles
 
     # Add pads as obstacles (excluding nets we'll route - their pads added per-net)
     # Priced per obstacle: max(routing-side clearance, the pad net's own class clearance)
@@ -773,9 +963,11 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     for _pn_i, (net_id, pads) in enumerate(pcb_data.pads_by_net.items()):
         if (_pn_i & 63) == 0:
             _report("pads", _pn_i, _n_pad_nets)
-        if net_id in nets_to_route_set or not stamp_pads:
+        if _skip(net_id) or not stamp_pads:
             continue
         for pad in pads:
+            if _only is not None and id(pad) in _tie_partner_pad_ids:
+                raise DeltaIneligible('net-tie partner pad')
             if id(pad) in _tie_partner_pad_ids:
                 _rec = _RecordingObstacles(obstacles)
                 _add_pad_obstacle(_rec, pad, coord, layer_map, config, extra_clearance,
@@ -792,6 +984,23 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # 1,593 batch entries for 1,136 pads, per base build, 629 builds/route).
     _flush_cell_sink(obstacles, _pad_cell_sink)
     _flush_via_sink(obstacles, _pad_via_sink)
+    if _only is not None:
+        # The rest of a build for no net, less a build for `_only`, is these
+        # nets' hole-rule pad holes (add_drill_hole_obstacles); everything
+        # else below is the same in both builds.
+        _own_pads = [p for nid in _only for p in pcb_data.pads_by_net.get(nid, ())]
+        if any(p.drill > 0 and _pad_has_copper(p) and plated_drill_exposed(p)
+               for p in _own_pads):
+            raise DeltaIneligible('exposed plated drill')
+        if getattr(config, 'hole_rules', None) is not None and _own_pads:
+            stamp_hole_rule_pad_holes(obstacles, _own_pads, config, extra_clearance)
+        # ... and what a build for `_only` adds that one for no net does not:
+        # their protected sense branches (#1279), stamped as foreign copper.
+        from sense_branch import stamp_base_obstacles as _sense_stamp
+        _plus = GridObstacleMap(num_layers)
+        _sense_stamp(_plus, pcb_data, config, set(_only), coord, layer_map,
+                     _obstacle_clearance, extra_clearance)
+        return _real_obstacles, _plus
 
     # #1279: a protected Kelvin sense branch of a net this map is built to
     # route is foreign copper to that net too, except on its join pad.

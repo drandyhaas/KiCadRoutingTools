@@ -460,6 +460,203 @@ def _closest_pair(points_a, points_b):
     return best
 
 
+def _fp_value(v, keep, depth=0):
+    """A hashable stand-in for a config or board value: scalars and small
+    containers by value, anything else by identity. An object compared by
+    identity is appended to `keep`, which the cache entry holds: while the
+    entry lives the object cannot be freed, so no new object can take its
+    address and pass for it (the #977 address reuse)."""
+    if v is None or isinstance(v, (bool, int, float, str, bytes)):
+        return v
+    if depth < 3 and isinstance(v, (list, tuple)):
+        return (type(v).__name__, len(v), tuple(_fp_value(x, keep, depth + 1) for x in v))
+    if depth < 3 and isinstance(v, (set, frozenset)):
+        return ('set', len(v), tuple(sorted((repr(_fp_value(x, keep, depth + 1)) for x in v))))
+    if depth < 3 and isinstance(v, dict):
+        return ('dict', len(v), tuple(sorted(((repr(k), _fp_value(x, keep, depth + 1))
+                                              for k, x in v.items()), key=lambda t: t[0])))
+    keep.append(v)
+    return ('id', id(v))
+
+
+_PAD_GETTERS: dict = {}
+
+
+def _pad_content(pad, keep):
+    """Every dataclass field of `pad` by value: its net, position, size,
+    shape, layers, drill, clearance and copper polygons. An in-place edit
+    (a net swap that keeps both pad lists, a pad moved through `global_x`)
+    changes this, where the list's identity and length do not."""
+    t = type(pad)
+    get = _PAD_GETTERS.get(t)
+    if get is None:
+        import dataclasses
+        import operator
+        names = ([f.name for f in dataclasses.fields(t)] if dataclasses.is_dataclass(t)
+                 else sorted(vars(pad)))
+        get = _PAD_GETTERS[t] = (operator.attrgetter(*names) if len(names) > 1
+                                 else (lambda p, _n=names[0]: (getattr(p, _n),)))
+    vals = get(pad)
+    return tuple(x if x is None or isinstance(x, (bool, int, float, str))
+                 else _fp_value(x, keep, 1) for x in vals)
+
+
+def _pads_digest(pads_by_net, keep):
+    """Every pad by content. A pickle of the lists walks every field of every
+    pad in C (a third of the field walk below on the largest example board);
+    a pad that does not pickle falls back to the field walk. Equal content can
+    pickle differently only where objects are shared differently, which costs
+    a rebuild, never a stale base."""
+    import hashlib
+    import pickle
+    try:
+        return hashlib.blake2b(pickle.dumps(pads_by_net, protocol=5),
+                               digest_size=20).digest()
+    except Exception:
+        return tuple((nid, tuple(_pad_content(p, keep) for p in lst))
+                     for nid, lst in pads_by_net.items())
+
+
+def _non_copper_fingerprint(pcb, cfg):
+    """What a no-net base depends on besides tracks and vias, as
+    (config part, board part, keep): every config field; every pad by
+    content; the footprints, zones, keep-outs, nets and board_info by
+    identity. `keep` holds every object compared by identity, so none of them
+    can be freed and its address reused while the cache entry stands. A base
+    carried to a new copper epoch (`rebase_no_net_map`) is stamped with copper
+    only, so it is valid only while both parts are unchanged."""
+    import dataclasses
+    keep = []
+    if dataclasses.is_dataclass(cfg):
+        names = [f.name for f in dataclasses.fields(cfg)]
+        c = tuple((n, _fp_value(getattr(cfg, n, None), keep)) for n in names)
+        names = set(names)
+    else:
+        c, names = (), set()
+    extra = tuple(sorted((k, _fp_value(v, keep)) for k, v in vars(cfg).items()
+                         if k not in names))
+    pads = _pads_digest(pcb.pads_by_net, keep)
+    board_fp = []
+    for k in ('footprints', 'zones', 'keepout_zones', 'nets', 'board_info'):
+        obj = getattr(pcb, k, None)
+        keep.append(obj)
+        board_fp.append((k, id(obj), len(obj) if hasattr(obj, '__len__') else -1))
+    return (c, extra), (pads, tuple(board_fp)), keep
+
+
+# The longest terminal escalation ladder: up to three size rungs and the
+# #1853 copper-clearance-alone rung (`_escalation_ladder`).
+RESCUE_BASE_LRU = 4
+
+
+def _evict_rescue_base(cache, clock):
+    """Drop one base. First one no request used in the last
+    2 * RESCUE_BASE_LRU (the board or config moved on; oldest first), else
+    the one with the fewest hits, the newest among equals. A base the
+    escalation shares across nets collects a hit per net; a base only one
+    net's config can use (a power or impedance net, whose ladder pops it from
+    the width maps, #2078) collects one, so it goes, the newcomer included,
+    instead of a shared rung."""
+    idle = [k for k, e in cache.items() if clock - e['used'] > 2 * RESCUE_BASE_LRU]
+    if idle:
+        victim = idle[0]
+    else:
+        victim = min(reversed(cache), key=lambda k: cache[k]['hits'])
+    del cache[victim]
+
+
+def _delta_rescue_map(pcb, cfg, net_id, net_clearances, key):
+    """A board-global rescue map for `net_id` derived from a shared no-net base
+    (`incremental_net_map`), or None where it cannot be: the escalation and the
+    own-requirement retry try every failed net at the same copper, so one base
+    build per (copper epoch, geometry, clearance floor, config) serves all of
+    them and each net costs a stamp of its own copper instead of a whole-board
+    build. The base and the lift records it set are cached together; a derived
+    map is the exact map a fresh build returns (KICAD_NET_MAP_VERIFY=1 checks
+    it)."""
+    from collections import OrderedDict
+    from obstacle_map import (build_base_obstacle_map, incremental_net_eligible,
+                              incremental_net_map, net_map_clearance_floor,
+                              DeltaIneligible, copper_snapshot, rebase_no_net_map,
+                              _copper_delta)
+    floor = net_map_clearance_floor(cfg, net_clearances, net_id)
+    epoch = key[1]
+    cfg_fp, board_fp, keep = _non_copper_fingerprint(pcb, cfg)
+    # Without the epoch: a base from an earlier epoch is carried over by the
+    # copper routed or ripped since (`rebase_no_net_map`) instead of rebuilt.
+    # With the config: a config that differs (an escalation rung that pops
+    # this net's width override) is a base of its own, never a replacement.
+    bkey = (key[2:], floor, tuple(sorted((net_clearances or {}).items())), cfg_fp)
+    cache = getattr(pcb, '_rescue_base_cache', None)
+    if cache is None:
+        cache = pcb._rescue_base_cache = OrderedDict()
+    entry = cache.get(bkey)
+    if entry is not None and entry['board'] != board_fp:
+        # A pad, footprint, zone or keep-out that changed since the base was
+        # built makes it a different board, which no copper delta carries over.
+        if env_knobs.NET_MAP_VERIFY:
+            _diff = [n for n, a, b in zip(('pads', 'board'), entry['board'], board_fp)
+                     if a != b]
+            print(f'  rescue base rebuilt: non-copper inputs changed ({", ".join(_diff)})')
+        entry = None
+    if (entry is not None and entry['epoch'] == epoch and entry['snap'] is not None
+            and env_knobs.NET_MAP_VERIFY):
+        # Same epoch, so the base is served as is: copper edited without
+        # bump_copper_epoch would make every net's map stale.
+        _rm, _add = _copper_delta(entry['snap'], copper_snapshot(pcb, entry['snap']))
+        if any(_rm) or any(_add):
+            raise AssertionError('rescue base: tracks or vias changed without '
+                                 'bump_copper_epoch')
+    if entry is not None and entry['epoch'] != epoch:
+        old = entry
+        entry = None
+        if (old['base'] is not None and not any(old['records'])
+                and incremental_net_eligible(pcb, cfg)):
+            try:
+                old['snap'] = rebase_no_net_map(old['base'], old['snap'], pcb, cfg,
+                                                net_clearances=net_clearances,
+                                                clearance_floor=floor)
+                old['epoch'] = epoch
+                entry = old
+            except DeltaIneligible:
+                pass
+    if entry is None:
+        base = records = snap = None
+        if incremental_net_eligible(pcb, cfg):
+            base = build_base_obstacle_map(pcb, cfg, [], net_clearances=net_clearances,
+                                           _clearance_floor=floor)
+            records = tuple(getattr(pcb, _k, None) for _k in _LIFT_KEYS)
+            snap = copper_snapshot(pcb) if not any(records) else None
+        entry = dict(base=base, records=records, snap=snap, epoch=epoch,
+                     board=board_fp, keep=keep, hits=0, used=0)
+        cache.pop(bkey, None)
+        cache[bkey] = entry
+    else:
+        cache.move_to_end(bkey)
+    clock = pcb._rescue_base_clock = getattr(pcb, '_rescue_base_clock', 0) + 1
+    entry['hits'] += 1
+    entry['used'] = clock
+    # Each base is a whole-board map. Terminal escalation walks every net
+    # through its whole ladder, so the cache holds one base per rung or each
+    # net evicts the base the next net needs first. The entry in hand serves
+    # this request even when it is the one evicted.
+    while len(cache) > RESCUE_BASE_LRU:
+        _evict_rescue_base(cache, clock)
+    base, records = entry['base'], entry['records']
+    if base is None:
+        return None
+    for _k, _v in zip(_LIFT_KEYS, records):
+        setattr(pcb, _k, _v)
+    try:
+        out = incremental_net_map(base, pcb, cfg, net_id, net_clearances=net_clearances)
+    except DeltaIneligible:
+        return None
+    return out
+
+
+_LIFT_KEYS = ('_net_tie_lift', '_graphic_own_pad_lift', '_graphic_own_pad_via_lift')
+
+
 def _pristine_rescue_map(board, parent_pcb, cfg, net_id, net_clearances,
                          scope_key):
     """Per-board LRU of PRISTINE rescue obstacle maps (2026-08-14 profiling:
@@ -510,8 +707,11 @@ def _pristine_rescue_map(board, parent_pcb, cfg, net_id, net_clearances,
            getattr(cfg, 'hole_rules', None) is not None)
     entry = cache.get(key)
     if entry is None:
-        pristine = build_base_obstacle_map(board, cfg, [net_id],
-                                           net_clearances=net_clearances)
+        pristine = (_delta_rescue_map(board, cfg, net_id, net_clearances,
+                                      key[1:]) if board is parent_pcb else None)
+        if pristine is None:
+            pristine = build_base_obstacle_map(board, cfg, [net_id],
+                                               net_clearances=net_clearances)
         entry = (pristine,
                  (getattr(board, '_graphic_own_pad_lift', None) or {}).get(net_id),
                  (getattr(board, '_graphic_own_pad_via_lift', None) or {}).get(net_id))
