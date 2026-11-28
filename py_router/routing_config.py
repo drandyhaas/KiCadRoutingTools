@@ -327,6 +327,13 @@ class GridRouteConfig:
     # `Via.via_type` of those vias: 'micro', 'blind' or 'buried'
     # (`via_span.resolve_via_span`).
     via_span_type: Optional[str] = None
+    # #1842: the kinds of via this step's SEARCH may change layers through
+    # (`via_kinds.ViaKind`, in the order declared), each legal where a via
+    # of that kind fits. None = one kind: the through via, or `via_span`'s.
+    via_kinds: Optional[Tuple] = None
+    # #1842: ((layer, mm), ...) -- layers that carry only a jog between two
+    # vias, at most that much track each time. None = no such layer.
+    jog_caps: Optional[Tuple] = None
     neckdown_length: float = 2.5  # mm pad-entry zone (pad-capped width where it fits, #1318)
     neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias

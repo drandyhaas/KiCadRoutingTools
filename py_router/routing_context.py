@@ -6,6 +6,7 @@ like building obstacle maps and recording route results.
 """
 from __future__ import annotations
 
+from via_kinds import unmirrored as _unmirrored_kinds
 from collections import OrderedDict
 from typing import List, Set, Dict, Optional, Tuple, TYPE_CHECKING
 import contextlib
@@ -538,7 +539,8 @@ def build_single_ended_obstacles(
     if _op_lift is not None and len(_op_lift):
         obstacles.remove_blocked_cell_spans_batch(_op_lift)
     if _op_via is not None and len(_op_via):
-        obstacles.remove_blocked_via_spans_batch(_op_via)
+        with _unmirrored_kinds(obstacles):   # #1842
+            obstacles.remove_blocked_via_spans_batch(_op_via)
 
     # Add other unrouted nets as obstacles (can use cache since they haven't changed).
     # FIRST, ahead of the raw adds below (#1226): a cache entry stamps every via
@@ -817,7 +819,8 @@ def prepare_obstacles_inplace(
     _op_via = (getattr(pcb_data, '_graphic_own_pad_via_lift', None)
                or {}).get(net_id)
     if _op_via is not None and len(_op_via):
-        working_obstacles.remove_blocked_via_spans_batch(_op_via)
+        with _unmirrored_kinds(working_obstacles):   # #1842
+            working_obstacles.remove_blocked_via_spans_batch(_op_via)
         _lift_record(_OWNPAD_VIA_LIFTED, working_obstacles, net_id, _op_via)
 
     _tie_lift = getattr(pcb_data, '_net_tie_lift', None)
@@ -1092,7 +1095,8 @@ def restore_obstacles_inplace(
         working_obstacles.add_blocked_cell_spans_batch(_op)
     _opv = _lift_take(_OWNPAD_VIA_LIFTED, working_obstacles, net_id)
     if _opv is not None and len(_opv):
-        working_obstacles.add_blocked_via_spans_batch(_opv)
+        with _unmirrored_kinds(working_obstacles):   # #1842
+            working_obstacles.add_blocked_via_spans_batch(_opv)
 
     # Restore current net's obstacles (from cache - original stubs)
     # Note: If routing succeeded, caller should update cache first with new route data
@@ -1131,7 +1135,8 @@ def ensure_own_pad_lift(obstacles, pcb_data, net_id):
         _lift_record(_OWNPAD_LIFTED, obstacles, net_id, cells)
         did = True
     if vias is not None and len(vias):
-        obstacles.remove_blocked_via_spans_batch(vias)
+        with _unmirrored_kinds(obstacles):   # #1842
+            obstacles.remove_blocked_via_spans_batch(vias)
         _lift_record(_OWNPAD_VIA_LIFTED, obstacles, net_id, vias)
         did = True
     return key if did else None
@@ -1146,7 +1151,8 @@ def release_own_pad_lift(obstacles, net_id, token):
         obstacles.add_blocked_cell_spans_batch(cells)
     vias = _lift_take(_OWNPAD_VIA_LIFTED, obstacles, net_id)
     if vias is not None and len(vias):
-        obstacles.add_blocked_via_spans_batch(vias)
+        with _unmirrored_kinds(obstacles):   # #1842
+            obstacles.add_blocked_via_spans_batch(vias)
 
 
 def record_pair_paths(routed_net_paths: Dict, pair, result: Dict) -> None:

@@ -63,7 +63,8 @@ for _n in ('add_blocked_vias_batch', 'remove_blocked_vias_batch',
            'add_blocked_vias_small_batch', 'remove_blocked_vias_small_batch',
            'add_static_blocked_vias_batch'):
     _ROW_METHODS[_n] = ('vias', 0)
-for _n in ('add_blocked_vias_rung_batch', 'remove_blocked_vias_rung_batch'):
+for _n in ('add_blocked_vias_rung_batch', 'remove_blocked_vias_rung_batch',
+           'add_blocked_vias_kind_batch', 'remove_blocked_vias_kind_batch'):
     _ROW_METHODS[_n] = ('vias', 1)
 for _n in ('add_blocked_via_spans_batch', 'remove_blocked_via_spans_batch',
            'add_static_blocked_via_spans_batch'):
@@ -78,7 +79,7 @@ _POINT_METHODS = {
 # what a sub-build may ask the parent's map; every other call it makes
 # (cost fields, zones, source/target cells) goes to a map of its own
 _QUERY_PREFIXES = ('is_', 'get_', 'blocked_', 'rung_', 'segment_blocked',
-                   'open_via', 'populated')
+                   'open_via', 'populated', 'via_kind_', 'kind_mirror')
 
 
 _ANNOUNCED = set()

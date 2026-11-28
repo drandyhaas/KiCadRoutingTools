@@ -70,6 +70,7 @@ REGISTRY = {
     'obstacle_map.py:add_pour_barrier_obstacles': ('inside', 'build_base_obstacle_map'),
     'obstacle_map.py:_add_segment_obstacle_with_exclusion': ('inside', 'net stubs'),
     'obstacle_map.py:_stamp_rungs_at_own_via': ('inside', 'net stubs / pads / vias'),
+    'obstacle_map.py:_stamp_kinds_at_own_via': ('inside', '_stamp_rungs_at_own_via (#1842)'),
     'obstacle_map.py:_mirror_rungs_add': ('inside', 'list stamps'),
     'obstacle_map.py:_mirror_rungs_remove': ('inside', 'list stamps'),
     'obstacle_map.py:_batch_cells_one_layer': ('inside', 'builders, the composed route stamp'),

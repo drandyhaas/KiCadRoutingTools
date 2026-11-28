@@ -41,6 +41,7 @@ Design constraints (#331/#371 review):
     clearance ledger, so check_drc grades at the true floor (#226).
 """
 
+from via_kinds import unmirrored as _unmirrored_kinds
 import env_knobs
 import contextlib
 import math
@@ -529,7 +530,8 @@ def _pristine_rescue_map(board, parent_pcb, cfg, net_id, net_clearances,
     if _op_cells is not None and len(_op_cells):
         obstacles.remove_blocked_cell_spans_batch(_op_cells)
     if _op_vias is not None and len(_op_vias):
-        obstacles.remove_blocked_via_spans_batch(_op_vias)
+        with _unmirrored_kinds(obstacles):   # #1842
+            obstacles.remove_blocked_via_spans_batch(_op_vias)
     return obstacles
 
 
